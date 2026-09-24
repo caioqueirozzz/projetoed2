@@ -26,7 +26,7 @@ target_link_libraries(ame_core_app PRIVATE ame_core)
 
 # ---- Tests -------------------------------------------------------------------
 enable_testing()
-foreach(test_name test_skiplist test_splay test_similarity)
+foreach(test_name test_skiplist test_splay test_similarity test_acoustic_key)
     add_executable(${test_name} tests/${test_name}.cpp)
     target_link_libraries(${test_name} PRIVATE ame_core)
     add_test(NAME ${test_name} COMMAND ${test_name})
