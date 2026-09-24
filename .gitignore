@@ -1,0 +1,28 @@
+# Build output
+build/
+*.o
+*.obj
+*.a
+*.out
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# FMA dataset (large — download locally, do not commit)
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+
+# Benchmark output (regenerated)
+benchmark/results/*
+!benchmark/results/.gitkeep
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
