@@ -63,3 +63,4 @@ stubs marcados por `TODO`, seguindo a ordem de desenvolvimento do plano
 Cinco integrantes, com divisão de responsabilidades descrita no plano (§39):
 Skip List / Acoustic Key, Splay Tree, processamento do FMA, Streamlit, e
 benchmarks / integração.
+# projetoed2
