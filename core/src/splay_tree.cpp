@@ -271,10 +271,9 @@ std::string SplayTree::toAscii() const {
     if (!root_) return "(empty)\n";
 
     std::string out;
+
     out += "[" + std::to_string(root_->trackId) + "]\n";
 
-    // Recursive builder: prints each child with its side label (L/R) so the
-    // left/right relationship is always explicit even for single-child nodes.
     std::function<void(const SplayNode*, const std::string&, bool, bool)> build
         = [&](const SplayNode* node, const std::string& prefix, bool isLast, bool isLeft) {
         out += prefix;
@@ -301,7 +300,6 @@ std::string SplayTree::toAscii() const {
     } else if (root_->right) {
         build(root_->right, "", true, false);
     }
-
     return out;
 }
 
