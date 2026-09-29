@@ -20,6 +20,7 @@ import streamlit as st
 # Allow importing services from the app package root.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from components.music import track_selector
 from services.core_bridge import AccessResult, get_bridge
 from services.dataset import audio_path, format_label, load_catalog
 
@@ -58,26 +59,7 @@ if not bridge.is_loaded:
 
 catalog = load_catalog()
 
-if catalog.empty:
-    # Demo mode: allow the user to type any track ID.
-    st.info(
-        "Modo demo — dataset não encontrado. "
-        "Digite qualquer ID de faixa para demonstrar o comportamento da Splay Tree."
-    )
-    track_id = int(
-        st.number_input("ID da faixa", min_value=1, value=2, step=1, key="demo_id")
-    )
-    track_label = f"Track {track_id}"
-else:
-    # Build a sorted list of (label, id) for the dropdown.
-    options: list[tuple[str, int]] = [
-        (format_label(tid, catalog), tid)
-        for tid in catalog.index[:500]  # cap at 500 to keep the dropdown fast
-    ]
-    labels = [lbl for lbl, _ in options]
-    chosen = st.selectbox("Selecione uma faixa", labels, key="track_sel")
-    track_id = next(tid for lbl, tid in options if lbl == chosen)
-    track_label = chosen
+track_id, track_label = track_selector(catalog, "profile_track", "Selecione uma faixa")
 
 # ── access button ─────────────────────────────────────────────────────────────
 

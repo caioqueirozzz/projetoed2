@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <vector>
+#include <unordered_map>
 
 #include "track.hpp"
 
@@ -24,12 +25,14 @@ double euclidean(const std::vector<double>& a, const std::vector<double>& b);
 /// closest, using a bounded max-heap (std::priority_queue) so we never fully
 /// sort the candidate set (plan §14).
 ///
-/// @param tracks       lookup from trackId -> Track (e.g. an unordered_map view).
+/// @param tracks       collection of tracks.
+/// @param trackIndex   optional prebuilt ID -> vector index map, avoiding O(N) per query.
 /// @param candidateIds trackIds produced by SkipList::nearest.
 /// @param k            number of results to return.
 std::vector<SimilarityResult> topK(const std::vector<double>& query,
                                     const std::vector<Track>& tracks,
                                     const std::vector<int>& candidateIds,
-                                    std::size_t k);
+                                    std::size_t k,
+                                    const std::unordered_map<int, std::size_t>* trackIndex = nullptr);
 
 }  // namespace ame

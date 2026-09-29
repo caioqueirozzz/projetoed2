@@ -1,208 +1,195 @@
-"""Página 2 — Exploração Acústica (plan §25).
-
-Busca candidatos via Skip List e aplica filtros por faixa de feature acústica
-(RMS, Centroide Espectral, ZCR, Largura de Banda, Roll-off) no lado Python.
-"""
-
+"""Explore a Skip List candidate window using distribution-aware acoustic filters."""
 from __future__ import annotations
 
-import math
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from components.music import track_selector
+from services.acoustic_filters import FEATURE_COLUMNS, FEATURE_LABELS, matching_ids, percentile_bounds
 from services.core_bridge import get_bridge
-from services.dataset import format_label, get_track, load_catalog
-
-_REPO_ROOT    = Path(__file__).resolve().parent.parent.parent
-_FEATURES_CSV = _REPO_ROOT / "data" / "processed" / "tracks_processed.csv"
-_FEATURE_NAMES = ["rms", "spectral_centroid", "zcr", "bandwidth", "rolloff"]
-_FEATURE_LABELS = {
-    "rms":              "RMS (energia)",
-    "spectral_centroid":"Centroide Espectral",
-    "zcr":              "ZCR (taxa de cruzamento)",
-    "bandwidth":        "Largura de Banda",
-    "rolloff":          "Roll-off Espectral",
-}
+from services.dataset import PROCESSED_CSV, get_track, load_catalog
 
 
 @st.cache_data
-def load_features() -> pd.DataFrame | None:
-    if not _FEATURES_CSV.exists():
-        return None
-    df = pd.read_csv(_FEATURES_CSV, header=0)
-    feat_cols = df.columns[5:10].tolist()
-    result = df[["track_id"] + feat_cols].copy()
-    result.columns = ["track_id"] + _FEATURE_NAMES
-    return result.set_index("track_id")
+def load_features(signature: tuple[int, int]) -> pd.DataFrame:
+    return pd.read_csv(
+        PROCESSED_CSV, usecols=["track_id", *FEATURE_COLUMNS], index_col="track_id"
+    ).rename(columns=FEATURE_COLUMNS)
+
+
+def reset_filters() -> None:
+    for feature in FEATURE_LABELS:
+        st.session_state[f"acoustic_percentile_{feature}"] = (0, 100)
+        st.session_state[f"acoustic_value_{feature}"] = (0.0, 1.0)
 
 
 st.set_page_config(page_title="Acoustic Explorer — AME", layout="wide")
 st.title("Acoustic Explorer")
 st.markdown(
-    "Combine a busca por vizinhança da **Skip List** com filtros exatos por "
-    "atributo acústico para explorar regiões do espaço sonoro (plan §25)."
+    "Escolha uma música de referência e explore seus candidatos da **Skip List** "
+    "por características acústicas. Os resultados são ordenados por similaridade."
 )
 
-# ── bridge ────────────────────────────────────────────────────────────────────
-
 bridge = get_bridge()
-
 if bridge is None:
-    err = st.session_state.get("bridge_error", "Motivo desconhecido.")
-    st.error(f"**Núcleo C++ indisponível.** {err}")
-    st.code(
-        "# No diretório raiz do projeto:\n"
-        "cmake -S . -B build && cmake --build build",
-        language="bash",
-    )
+    st.error(st.session_state.get("bridge_error", "Núcleo C++ indisponível."))
+    st.code("cmake -S . -B build && cmake --build build", language="bash")
     st.stop()
-
 if not bridge.is_loaded:
-    st.warning(
-        "Dataset não carregado — busca indisponível. "
-        "Execute `python preprocessing/build_dataset.py`.",
-        icon="⚠",
-    )
+    st.warning("Dataset não carregado. Execute `python preprocessing/build_dataset.py`.")
     st.stop()
-
-# ── track selector ────────────────────────────────────────────────────────────
 
 catalog = load_catalog()
-
-if catalog.empty:
-    st.info("Modo demo — dataset não encontrado. Digite qualquer ID de faixa.")
-    track_id = int(st.number_input("ID da faixa", min_value=1, value=2, step=1))
-    track_label = f"Track {track_id}"
-else:
-    options: list[tuple[str, int]] = [
-        (format_label(tid, catalog), tid)
-        for tid in catalog.index[:500]
-    ]
-    labels = [lbl for lbl, _ in options]
-    chosen = st.selectbox("Selecione uma faixa de referência", labels, key="ae_track_sel")
-    track_id = next(tid for lbl, tid in options if lbl == chosen)
-    track_label = chosen
-
-# ── search parameters ─────────────────────────────────────────────────────────
+track_id, track_label = track_selector(catalog, "ae_track_sel", "Selecione uma faixa de referência")
+stat = PROCESSED_CSV.stat()
+signature = (stat.st_mtime_ns, stat.st_size)
+features = load_features(signature)
 
 with st.expander("Parâmetros de busca", expanded=True):
     num_candidates = st.slider(
-        "Candidatos da Skip List", min_value=100, max_value=2000,
-        value=500, step=100,
-        help="Número de candidatos recuperados pela Skip List antes da filtragem.",
+        "Candidatos da Skip List", min_value=100, max_value=5000, value=500, step=100,
+        key="ae_candidate_count",
+        help="Uma janela maior permite encontrar mais faixas que atendam aos filtros.",
     )
-
-# ── acoustic filters ──────────────────────────────────────────────────────────
-
-features_df = load_features()
-filters: dict[str, tuple[float, float]] = {}
 
 st.subheader("Filtros acústicos")
-
-if features_df is None:
-    st.info(
-        "CSV de features não encontrado — filtros desabilitados. "
-        "Os resultados exibidos são os retornados diretamente pela Skip List."
+mode = st.radio(
+    "Escala dos filtros", ["Percentis do catálogo", "Valores normalizados"],
+    horizontal=True, key="acoustic_filter_mode",
+)
+if mode == "Percentis do catálogo":
+    st.caption(
+        "Os percentis indicam a posição no catálogo: 0% é o menor valor e 100% é o maior. "
+        "Por exemplo, de 0% a 50% seleciona aproximadamente a metade das faixas com valores mais baixos "
+        "naquele atributo. Valores empatados são mantidos juntos."
     )
 else:
-    cols = st.columns(len(_FEATURE_NAMES))
-    for col, fname in zip(cols, _FEATURE_NAMES):
-        with col:
-            filters[fname] = st.slider(
-                _FEATURE_LABELS[fname],
-                min_value=0.0, max_value=1.0,
-                value=(0.0, 1.0), step=0.05,
-                key=f"filter_{fname}",
+    st.caption(
+        "Ajuste diretamente os valores entre 0 e 1, em passos de 0,001. "
+        "As músicas podem estar concentradas em uma faixa pequena dessa escala."
+    )
+st.button("Restaurar filtros", on_click=reset_filters)
+
+bounds: dict[str, tuple[float, float]] = {}
+for col, (feature, label) in zip(st.columns(len(FEATURE_LABELS)), FEATURE_LABELS.items()):
+    with col:
+        values = features[feature]
+        if mode == "Percentis do catálogo":
+            interval = st.slider(
+                label, min_value=0, max_value=100, value=(0, 100), step=1,
+                format="%d%%", key=f"acoustic_percentile_{feature}",
             )
-
-# ── search button ─────────────────────────────────────────────────────────────
-
-do_search = st.button("Buscar e filtrar", type="primary")
-
-if do_search:
-    try:
-        with st.spinner("Buscando..."):
-            results, metrics = bridge.find_similar(track_id, num_candidates, top_k=50)
-
-        filtered_ids = [r.track_id for r in results]
-        n_from_sl = len(filtered_ids)
-
-        if features_df is not None and filters:
-            def passes(tid: int) -> bool:
-                if tid not in features_df.index:
-                    return True
-                row = features_df.loc[tid]
-                return all(
-                    filters[f][0] <= float(row[f]) <= filters[f][1]
-                    for f in _FEATURE_NAMES
-                )
-            filtered = [r for r in results if passes(r.track_id)]
+            bounds[feature] = percentile_bounds(values, interval)
         else:
-            filtered = results
+            bounds[feature] = st.slider(
+                label, min_value=0.0, max_value=1.0, value=(0.0, 1.0), step=0.001,
+                format="%.4f", key=f"acoustic_value_{feature}",
+            )
+        low, high = bounds[feature]
+        st.caption(f"Intervalo aplicado: {low:.4f} a {high:.4f}")
+        if track_id in features.index:
+            reference = float(features.at[track_id, feature])
+            position = float(values.le(reference).mean() * 100)
+            st.caption(f"Referência: {reference:.4f} · percentil {position:.1f}%")
 
-        st.session_state.ae_results       = filtered
-        st.session_state.ae_n_from_sl     = n_from_sl
-        st.session_state.ae_n_after_filter= len(filtered)
-        st.session_state.ae_metrics       = metrics
-        st.session_state.ae_query_label   = track_label
+# Preview the whole catalog separately from the local candidate window.
+allowed_ids = matching_ids(features, bounds)
+allowed = set(allowed_ids) - {track_id}
+catalog_count = len(allowed)
+search_key = (track_id, num_candidates, signature)
+cached = st.session_state.get("ae_candidate_search")
+current_search = cached is not None and cached["key"] == search_key
 
-    except Exception as exc:
+st.caption(
+    f"{catalog_count:,} outras faixas do catálogo atendem a todos os filtros. "
+    "Os cinco intervalos são aplicados em conjunto."
+)
+if st.button("Buscar e filtrar", type="primary"):
+    try:
+        with st.spinner("Buscando candidatos..."):
+            results, metrics = bridge.find_similar(track_id, num_candidates, top_k=num_candidates)
+        cached = {"key": search_key, "results": results, "metrics": metrics}
+        st.session_state.ae_candidate_search = cached
+        current_search = True
+    except RuntimeError as exc:
         st.error(f"Erro na busca: {exc}")
 
-st.divider()
-
-# ── results ───────────────────────────────────────────────────────────────────
-
-if "ae_results" in st.session_state:
-    ae_results      = st.session_state.ae_results
-    n_sl            = st.session_state.ae_n_from_sl
-    n_filt          = st.session_state.ae_n_after_filter
-    ae_metrics      = st.session_state.ae_metrics
-    ae_query_label  = st.session_state.ae_query_label
-
-    st.subheader(f"Resultados para: {ae_query_label}")
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Candidatos SL",       n_sl)
-    m2.metric("Após filtros",        n_filt)
-    m3.metric("Comparações SL",      ae_metrics.skiplist_comparisons)
-    m4.metric("Tempo busca (ms)",    f"{ae_metrics.total_ms:.2f}")
-
-    if ae_results:
-        rows = []
-        for i, r in enumerate(ae_results[:20], start=1):
-            info = get_track(r.track_id, catalog)
-            rows.append({
-                "Posição":   i,
-                "Título":    info["title"],
-                "Artista":   info["artist"],
-                "Gênero":    info["genre"],
-                "Distância": round(r.distance, 6),
-            })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+if not current_search:
+    # Results from another reference/budget must not look current.
+    for name in ("ae_results", "ae_n_from_sl", "ae_n_after_filter", "ae_metrics", "ae_query_label"):
+        st.session_state.pop(name, None)
+    if cached is not None:
+        st.info("A referência ou o número de candidatos mudou. Clique em Buscar e filtrar para atualizar a busca.")
     else:
-        st.info("Nenhuma faixa passou pelos filtros acústicos definidos.")
+        st.info("Clique em Buscar e filtrar. Depois, mover os filtros atualizará os resultados automaticamente.")
+else:
+    candidates = cached["results"]
+    filtered = [result for result in candidates if result.track_id in allowed]
+    metrics = cached["metrics"]
+    st.session_state.ae_results = filtered
+    st.session_state.ae_n_from_sl = len(candidates)
+    st.session_state.ae_n_after_filter = len(filtered)
+    st.session_state.ae_metrics = metrics
+    st.session_state.ae_query_label = track_label
 
-# ── explanation ───────────────────────────────────────────────────────────────
+    st.divider()
+    st.subheader(f"Resultados para: {track_label}")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Candidatos recuperados", len(candidates))
+    m2.metric("Candidatos após filtros", len(filtered))
+    m3.metric("Faixas no catálogo após filtros", catalog_count)
+    m4.metric("Tempo da busca (ms)", f"{metrics.total_ms:.2f}")
+    st.caption(
+        "Os filtros atualizam estes resultados automaticamente. O tempo se refere à última busca de candidatos. "
+        "A seleção de candidatos e a contagem do catálogo excluem a música de referência."
+    )
+    if filtered:
+        rows = []
+        for i, result in enumerate(filtered[:20], start=1):
+            info = get_track(result.track_id, catalog)
+            row = {"Posição": i, "Título": info["title"], "Artista": info["artist"],
+                   "Gênero": info["genre"], "Distância": round(result.distance, 6)}
+            row.update({label: round(float(features.at[result.track_id, feature]), 4)
+                        for feature, label in FEATURE_LABELS.items()})
+            rows.append(row)
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.caption(f"Exibindo {len(rows)} de {len(filtered):,} candidatos aprovados, por ordem de similaridade.")
+    elif catalog_count:
+        st.info(
+            f"Há {catalog_count:,} faixas compatíveis no catálogo, mas nenhuma entre os {len(candidates):,} "
+            "candidatos desta referência. Aumente o número de candidatos e refaça a busca, "
+            "escolha outra referência ou amplie os filtros."
+        )
+    else:
+        st.info("Nenhuma outra faixa do catálogo atende à combinação atual. Amplie os intervalos ou restaure os filtros.")
 
-with st.expander("Como funciona (plan §25)", expanded=False):
+with st.expander("Ver distribuição dos valores"):
+    shown = st.selectbox("Atributo", list(FEATURE_LABELS), format_func=FEATURE_LABELS.get,
+                         key="acoustic_distribution_feature")
+    values = features[shown].dropna()
+    counts, edges = np.histogram(values, bins=50, range=(0.0, 1.0))
+    distribution = pd.DataFrame({"Valor normalizado": (edges[:-1] + edges[1:]) / 2, "Faixas": counts})
+    st.bar_chart(distribution, x="Valor normalizado", y="Faixas")
+    quantiles = values.quantile([0.1, 0.5, 0.9])
+    st.caption(
+        f"10% das faixas têm valor até {quantiles.loc[0.1]:.4f}; "
+        f"50% até {quantiles.loc[0.5]:.4f}; 90% até {quantiles.loc[0.9]:.4f}. "
+        "Normalizar entre 0 e 1 não distribui as músicas uniformemente."
+    )
+
+with st.expander("Como os filtros funcionam"):
     st.markdown(
-        """
-**Busca ANN + filtro exato**
-
-1. A **Skip List** retorna os `N` candidatos mais próximos em espaço de chave
-   acústica — uma busca aproximada (ANN) eficiente em O(log n).
-2. Python carrega os valores de 5 features (RMS, Centroide, ZCR, Largura de
-   Banda, Roll-off) para esses candidatos e aplica o filtro por faixa exata.
-3. O resultado final contém apenas faixas dentro dos intervalos definidos nos
-   sliders, mantendo as mais próximas da faixa de referência.
-
-**Vantagem:** o filtro exato é aplicado sobre um subconjunto pequeno (candidatos
-da SL), não sobre todo o dataset, o que mantém a busca eficiente.
-        """
+        "A **Skip List** recupera uma janela em torno da chave acústica da referência. "
+        "Esses candidatos são ordenados pela distância euclidiana e filtrados pelos cinco intervalos.\n\n"
+        "No modo de percentis, cada controle é convertido em limites dos valores normalizados do catálogo. "
+        "A Acoustic Key e a distância continuam usando as mesmas características.\n\n"
+        "Os candidatos de uma referência podem se concentrar em regiões específicas. "
+        "Por isso, selecionar metade do catálogo em um atributo não garante manter metade dos candidatos; "
+        "combinar vários filtros também pode reduzir bastante os resultados."
     )

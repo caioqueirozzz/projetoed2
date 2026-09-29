@@ -20,14 +20,14 @@ from __future__ import annotations
 
 import json
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 # Paths resolved relative to this file so the module works from any CWD.
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 BINARY = _REPO_ROOT / "build" / "ame_core_app"
-CSV    = _REPO_ROOT / "data" / "processed" / "tracks_processed.csv"
+from .dataset import PROCESSED_CSV as CSV
 
 
 # ── typed result objects ──────────────────────────────────────────────────────
@@ -84,30 +84,35 @@ class SkipListState:
 class CoreBridge:
     """Manages a single long-lived C++ subprocess for the Streamlit session."""
 
-    def __init__(self) -> None:
-        if not BINARY.exists():
+    def __init__(self, binary: Path = BINARY, csv_path: Path = CSV) -> None:
+        if not binary.exists():
             raise FileNotFoundError(
-                f"C++ binary not found: {BINARY}\n"
+                f"C++ binary not found: {binary}\n"
                 "Build with:  cmake -S . -B build && cmake --build build"
             )
 
         self._proc = subprocess.Popen(
-            [str(BINARY)],
+            [str(binary)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
             bufsize=1,  # line-buffered
         )
 
         self._loaded = False
         self._track_count = 0
 
-        if CSV.exists():
-            resp = self._cmd(f"load {CSV}")
-            if resp.get("status") == "ok":
+        if csv_path.exists():
+            try:
+                resp = self._cmd(f"load {csv_path.resolve()}")
+                self._check(resp)
                 self._loaded = True
-                self._track_count = resp.get("loaded", 0)
+                self._track_count = resp["loaded"]
+            except Exception:
+                self.close()
+                raise
 
     # ── public interface ──────────────────────────────────────────────────────
 
@@ -198,14 +203,23 @@ class CoreBridge:
         except Exception:
             pass
         try:
-            self._proc.terminate()
-        except Exception:
-            pass
+            self._proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            self._proc.kill()
+            self._proc.wait()
+        finally:
+            for stream in (self._proc.stdin, self._proc.stdout, self._proc.stderr):
+                if stream:
+                    stream.close()
 
     # ── internal helpers ──────────────────────────────────────────────────────
 
     def _cmd(self, line: str) -> dict:
         """Send one command line and return the parsed JSON response."""
+        if "\n" in line or "\r" in line:
+            raise ValueError("Commands and paths must not contain line breaks")
+        if self._proc.poll() is not None:
+            raise RuntimeError("C++ core process is no longer running")
         assert self._proc.stdin and self._proc.stdout
         self._proc.stdin.write(line + "\n")
         self._proc.stdin.flush()
@@ -234,7 +248,17 @@ def get_bridge() -> Optional[CoreBridge]:
     # Import here to avoid making streamlit a hard dependency of this module.
     import streamlit as st
 
-    if "bridge" not in st.session_state:
+    stat = CSV.stat() if CSV.is_file() else None
+    signature = (stat.st_mtime_ns, stat.st_size) if stat else None
+    if "bridge" not in st.session_state or st.session_state.get("dataset_signature") != signature:
+        previous = st.session_state.get("bridge")
+        if previous is not None:
+            previous.close()
+        # Search results and profile snapshots belong to the previous dataset.
+        for key in list(st.session_state):
+            if key.startswith(("search_", "ae_", "sl_", "sp_")) or key in {"last_access", "access_history"}:
+                del st.session_state[key]
+        st.session_state.dataset_signature = signature
         try:
             st.session_state.bridge = CoreBridge()
             st.session_state.bridge_error = None

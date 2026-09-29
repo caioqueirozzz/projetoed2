@@ -16,6 +16,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from components.music import track_selector as select_catalog_track
 from services.core_bridge import AccessResult, get_bridge
 from services.dataset import format_label, get_track, load_catalog
 
@@ -43,15 +44,7 @@ if bridge is None:
 catalog = load_catalog()
 
 def track_selector(key: str) -> tuple[int, str]:
-    """Return (track_id, label). Uses number_input in demo mode."""
-    if catalog.empty:
-        tid = int(st.number_input("ID da faixa", min_value=1, value=2, step=1, key=key))
-        return tid, f"Track {tid}"
-    options = [(format_label(t, catalog), t) for t in catalog.index[:500]]
-    labels = [lbl for lbl, _ in options]
-    chosen = st.selectbox("Selecione uma faixa", labels, key=key)
-    tid = next(t for lbl, t in options if lbl == chosen)
-    return tid, chosen
+    return select_catalog_track(catalog, key)
 
 
 # ── tabs ──────────────────────────────────────────────────────────────────────
@@ -269,3 +262,17 @@ reprodução), o custo médio tende a O(1) — a estrutura "aprende" o padrão.
 - Splay Tree: O(log n) amortizado **e** se adapta ao padrão de acesso.
             """
         )
+
+# Results are generated explicitly by the C++ benchmark on the processed CSV.
+st.divider()
+st.subheader("Benchmark de similaridade — FMA")
+benchmark_path = Path(__file__).resolve().parents[2] / "benchmark" / "results" / "benchmark_recall.csv"
+if benchmark_path.is_file():
+    benchmark = pd.read_csv(benchmark_path)
+    st.dataframe(benchmark, use_container_width=True, hide_index=True)
+    if {"num_candidates", "recall_at_10"}.issubset(benchmark.columns):
+        st.line_chart(benchmark.set_index("num_candidates")[["recall_at_10"]])
+    st.caption("Resultado da última execução do benchmark; execute novamente após substituir o dataset.")
+else:
+    st.info("Ainda não há resultados medidos com o dataset processado.")
+    st.code("./build/benchmark_similarity", language="bash")

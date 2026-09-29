@@ -199,9 +199,30 @@ static void test_metrics() {
     check(list.metrics().removals == 1, "removal counter");
 }
 
+static void test_nearest_boundaries_and_backward_links() {
+    ame::SkipList list;
+    for (int i = 1; i <= 20; ++i) list.insert(i * 10, i);
+    list.remove(10, 1);
+    list.remove(100, 10);
+    list.remove(200, 20);
+    const auto all = list.traverse();
+    for (auto key : {0ULL, 115ULL, 999ULL}) {
+        check(list.nearest(key, 100) == all, "full window includes all tracks at any boundary");
+        check(list.nearest(key, 5).size() == 5, "window refills at boundaries after removal");
+    }
+    check(list.nearest(999, 1) == std::vector<int>{19}, "single candidate above tail");
+    check(list.nearest(100, 0).empty(), "zero candidate budget");
+    check(list.nearest(100, -1).empty(), "negative candidate budget");
+    list.metrics().reset();
+    list.nearest(115, 5);
+    check(list.metrics().searches == 1, "nearest increments searches");
+    check(list.metrics().comparisons > 0, "nearest counts key comparisons");
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 
 int main() {
+    test_nearest_boundaries_and_backward_links();
     test_empty();
     test_insert_and_search();
     test_sorted_order();

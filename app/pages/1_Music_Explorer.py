@@ -14,8 +14,9 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from components.music import track_selector, render_player
 from services.core_bridge import SearchMetrics, SearchResult, get_bridge
-from services.dataset import audio_path, format_label, get_track, load_catalog
+from services.dataset import format_label, get_track, load_catalog
 
 st.set_page_config(page_title="Music Explorer — AME", layout="wide")
 st.title("Music Explorer")
@@ -50,19 +51,11 @@ if not bridge.is_loaded:
 
 catalog = load_catalog()
 
-if catalog.empty:
-    st.info("Modo demo — dataset não encontrado. Digite qualquer ID de faixa.")
-    track_id = int(st.number_input("ID da faixa", min_value=1, value=2, step=1))
-    track_label = f"Track {track_id}"
-else:
-    options: list[tuple[str, int]] = [
-        (format_label(tid, catalog), tid)
-        for tid in catalog.index[:500]
-    ]
-    labels = [lbl for lbl, _ in options]
-    chosen = st.selectbox("Selecione uma faixa", labels, key="track_sel")
-    track_id = next(tid for lbl, tid in options if lbl == chosen)
-    track_label = chosen
+track_id, track_label = track_selector(catalog, "music_track", "Selecione uma faixa")
+
+st.subheader(track_label)
+render_player(track_id, catalog, bridge, "selected_track")
+st.caption("Use o botão de registro para incluir o acesso no perfil da Splay Tree.")
 
 # ── search controls ───────────────────────────────────────────────────────────
 
@@ -131,10 +124,15 @@ if "search_results" in st.session_state:
     df = pd.DataFrame(rows)
     st.dataframe(df, use_container_width=True, hide_index=True)
 
-    apath = audio_path(st.session_state.search_query_id, catalog)
-    if apath:
-        st.caption("Prévia da faixa consultada:")
-        st.audio(str(apath))
+    if results:
+        result_ids = [r.track_id for r in results]
+        listen_id = int(st.selectbox(
+            "Ouvir uma recomendação", result_ids,
+            format_func=lambda tid: format_label(tid, catalog), key="recommendation_track",
+        ))
+        render_player(listen_id, catalog, bridge, "recommended_track")
+    else:
+        st.info("Nenhuma outra faixa disponível para recomendar.")
 
 # ── explanation ───────────────────────────────────────────────────────────────
 

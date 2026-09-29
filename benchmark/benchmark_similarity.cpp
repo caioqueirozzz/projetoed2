@@ -1,10 +1,6 @@
-// Benchmark: Skip List candidate retrieval vs brute-force, Recall@10 as a
-// function of candidate count (plan §15, §16). Emits benchmark_recall.csv.
-//
-// Dataset : 5000 synthetic 44-dim tracks (uniform random in [0,1], seed 42+i)
-// Queries : 100 random tracks drawn from the dataset
-// Sweep   : num_candidates ∈ {50, 100, 250, 500, 1000, 2500, 5000}
-
+// Recall@10 on the processed FMA CSV, with a separately timed exhaustive baseline.
+// Run from repository root: build/benchmark_similarity [csv] [output_csv]
+// Explicit synthetic demonstration: build/benchmark_similarity --synthetic
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
@@ -12,102 +8,96 @@
 #include <iostream>
 #include <random>
 #include <set>
+#include <unordered_map>
 #include <vector>
 
 #include "acoustic_key.hpp"
+#include "dataset.hpp"
 #include "similarity.hpp"
 #include "skip_list.hpp"
-#include "track.hpp"
 
-using Clock = std::chrono::high_resolution_clock;
-
-static double elapsedMs(Clock::time_point t0) {
-    return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+using Clock = std::chrono::steady_clock;
+static double elapsedMs(Clock::time_point start) {
+    return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
 }
 
-int main() {
-    namespace fs = std::filesystem;
-    fs::create_directories("../benchmark/results");
-
-    const int DATASET_SIZE = 5000;
-    const int QUERY_COUNT  = 100;
-    const int DIMS         = 44;
-    const int TOP_K        = 10;
-
-    const std::vector<int> candidateCounts = {50, 100, 250, 500, 1000, 2500, 5000};
-
-    std::cout << "Building " << DATASET_SIZE << " synthetic tracks..." << std::flush;
-
-    ame::AcousticKey keyer(6, 10);
-    ame::SkipList    sl;
-    std::vector<ame::Track> tracks(DATASET_SIZE);
-
-    for (int i = 0; i < DATASET_SIZE; ++i) {
-        std::mt19937 rng(42 + i);
-        std::uniform_real_distribution<double> d(0.0, 1.0);
-
-        ame::Track& t = tracks[i];
-        t.id = i + 1;
-        t.features.resize(DIMS);
-        for (int dim = 0; dim < DIMS; ++dim) t.features[dim] = d(rng);
-        t.acousticKey = keyer.encode(t.features);
-        sl.insert(t.acousticKey, t.id);
-    }
-    std::cout << " done\n";
-
-    // All track IDs — used as the candidate set for brute-force
-    std::vector<int> allIds;
-    allIds.reserve(DATASET_SIZE);
-    for (const auto& t : tracks) allIds.push_back(t.id);
-
-    // Pick 100 random query indices
-    std::mt19937 qrng(42);
-    std::uniform_int_distribution<int> qd(0, DATASET_SIZE - 1);
-    std::vector<int> queryIdx(QUERY_COUNT);
-    for (auto& qi : queryIdx) qi = qd(qrng);
-
-    // Brute-force ground truth (top-10 by exact Euclidean distance)
-    std::cout << "Computing brute-force ground truth..." << std::flush;
-    std::vector<std::set<int>> groundTruth(QUERY_COUNT);
-    for (int qi = 0; qi < QUERY_COUNT; ++qi) {
-        const auto& q = tracks[queryIdx[qi]];
-        auto results = ame::topK(q.features, tracks, allIds, TOP_K);
-        for (const auto& r : results) groundTruth[qi].insert(r.trackId);
-    }
-    std::cout << " done\n";
-
-    std::ofstream csv("../benchmark/results/benchmark_recall.csv");
-    csv << "num_candidates,recall_at_10,avg_query_ms,dataset_size,queries\n";
-
-    for (int numCandidates : candidateCounts) {
-        std::cout << "  candidates=" << numCandidates << "..." << std::flush;
-
-        double totalRecall = 0.0;
-        double totalMs     = 0.0;
-
-        for (int qi = 0; qi < QUERY_COUNT; ++qi) {
-            const auto& q = tracks[queryIdx[qi]];
-
-            auto t0         = Clock::now();
-            auto candidates = sl.nearest(q.acousticKey, numCandidates);
-            auto results    = ame::topK(q.features, tracks, candidates, TOP_K);
-            totalMs        += elapsedMs(t0);
-
-            int hits = 0;
-            for (const auto& r : results)
-                if (groundTruth[qi].count(r.trackId)) ++hits;
-            totalRecall += (double)hits / TOP_K;
+int main(int argc, char** argv) {
+    try {
+        const bool synthetic = argc > 1 && std::string(argv[1]) == "--synthetic";
+        const std::string input = argc > 1 ? argv[1] : "data/processed/tracks_processed.csv";
+        const std::filesystem::path output = argc > 2 ? argv[2] :
+            (synthetic ? "benchmark/results/benchmark_recall_synthetic.csv" : "benchmark/results/benchmark_recall.csv");
+        std::vector<ame::Track> tracks;
+        if (synthetic) {
+            ame::AcousticKey keyer(6, 10);
+            std::mt19937 rng(42);
+            std::uniform_real_distribution<double> dist(0, 1);
+            for (int i = 0; i < 5000; ++i) {
+                ame::Track t;
+                t.id = i + 1;
+                for (int d = 0; d < 44; ++d) t.features.push_back(dist(rng));
+                t.acousticKey = keyer.encode(t.features);
+                tracks.push_back(std::move(t));
+            }
+        } else tracks = ame::loadTracksCsv(input);
+        if (tracks.size() < 2) throw std::runtime_error("At least two tracks are required");
+        const int count = static_cast<int>(tracks.size());
+        const int queries = std::min(100, count);
+        const int k = std::min(10, count - 1);
+        std::unordered_map<int, std::size_t> trackIndex;
+        std::vector<int> allIds;
+        ame::SkipList index;
+        for (std::size_t i = 0; i < tracks.size(); ++i) {
+            trackIndex[tracks[i].id] = i;
+            allIds.push_back(tracks[i].id);
+            index.insert(tracks[i].acousticKey, tracks[i].id);
         }
-
-        csv << numCandidates << ","
-            << totalRecall / QUERY_COUNT << ","
-            << totalMs     / QUERY_COUNT << ","
-            << DATASET_SIZE << ","
-            << QUERY_COUNT  << "\n";
-
-        std::cout << " recall=" << totalRecall / QUERY_COUNT << "\n";
+        std::mt19937 rng(42);
+        std::vector<int> queryIndices;
+        for (int i = 0; i < count; ++i) queryIndices.push_back(i);
+        std::shuffle(queryIndices.begin(), queryIndices.end(), rng);
+        queryIndices.resize(queries);
+        std::vector<std::set<int>> truth(queries);
+        double bruteMs = 0;
+        for (int i = 0; i < queries; ++i) {
+            const auto& q = tracks[queryIndices[i]];
+            auto start = Clock::now();
+            auto candidates = allIds;
+            candidates.erase(std::remove(candidates.begin(), candidates.end(), q.id), candidates.end());
+            const auto results = ame::topK(q.features, tracks, candidates, k, &trackIndex);
+            bruteMs += elapsedMs(start);
+            for (const auto& result : results) truth[i].insert(result.trackId);
+        }
+        if (output.has_parent_path()) std::filesystem::create_directories(output.parent_path());
+        std::ofstream csv(output);
+        if (!csv) throw std::runtime_error("Cannot write benchmark output");
+        csv << "num_candidates,recall_at_10,avg_query_ms,brute_force_ms,dataset_size,queries,top_k,dataset_source\n";
+        std::set<int> budgets;
+        for (int budget : {50, 100, 250, 500, 1000, 2500, 5000, count - 1})
+            budgets.insert(std::min(budget, count - 1));
+        for (int budget : budgets) {
+            double totalRecall = 0, totalMs = 0;
+            for (int i = 0; i < queries; ++i) {
+                const auto& q = tracks[queryIndices[i]];
+                auto start = Clock::now();
+                auto candidates = index.nearest(q.acousticKey, budget + 1);
+                candidates.erase(std::remove(candidates.begin(), candidates.end(), q.id), candidates.end());
+                if (static_cast<int>(candidates.size()) > budget) candidates.resize(budget);
+                auto results = ame::topK(q.features, tracks, candidates, k, &trackIndex);
+                totalMs += elapsedMs(start);
+                int hits = 0;
+                for (const auto& result : results) hits += truth[i].count(result.trackId);
+                totalRecall += static_cast<double>(hits) / k;
+            }
+            csv << budget << ',' << totalRecall / queries << ',' << totalMs / queries << ','
+                << bruteMs / queries << ',' << count << ',' << queries << ',' << k << ','
+                << (synthetic ? "synthetic" : "processed_csv") << '\n';
+            std::cout << "candidates=" << budget << " recall=" << totalRecall / queries << '\n';
+        }
+        if (!csv) throw std::runtime_error("Failed to write benchmark output");
+        std::cout << "Wrote " << output << '\n';
+    } catch (const std::exception& error) {
+        std::cerr << "Benchmark failed: " << error.what() << '\n';
+        return 1;
     }
-
-    std::cout << "Wrote benchmark/results/benchmark_recall.csv\n";
-    return 0;
 }

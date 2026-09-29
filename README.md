@@ -37,13 +37,23 @@ ctest --test-dir build --output-on-failure   # roda os testes
 Binários gerados em `build/`:
 `ame_core_app`, `benchmark_skiplist`, `benchmark_splay`, `benchmark_similarity`.
 
-## Pipeline de dados (Python)
+## Dataset: FMA Medium (Kaggle)
+
+Baixe os arquivos em [FMA — Small & Medium no Kaggle](https://www.kaggle.com/datasets/imsparsh/fma-free-music-archive-small-medium).
+São necessários os metadados (`tracks.csv`, `features.csv`, `genres.csv`) e os
+áudios de `fma_medium`. O Medium inclui as faixas rotuladas `small` e `medium`.
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r preprocessing/requirements.txt
-python preprocessing/build_dataset.py    # gera data/processed/tracks_processed.csv
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r preprocessing/requirements.txt -r app/requirements.txt
+python preprocessing/build_dataset.py --import-zip "/caminho/archive.zip"
 ```
+
+O pipeline produz o CSV com 44 características, parâmetros de normalização e
+um relatório de faixas/áudios ausentes. Também aceita pastas extraídas e áudios
+em outro disco. Veja [data/README.md](data/README.md) para as opções de importação,
+validação dos áudios e instruções completas.
 
 ## Interface (Streamlit)
 
@@ -52,15 +62,29 @@ pip install -r app/requirements.txt
 streamlit run app/app.py
 ```
 
-## Status
+## Estado atual e validação
 
-Scaffold inicial. As estruturas de dados e o pipeline estão declarados com
-stubs marcados por `TODO`, seguindo a ordem de desenvolvimento do plano
-(§40–§48). Comece pela Fase 2 (Skip List) e Fase 3 (Splay Tree) no núcleo C++.
+As estruturas C++, o pipeline FMA e a ponte Streamlit estão implementados.
+A interface oferece busca no catálogo completo, reprodução da faixa e das
+recomendações e registro explícito de acessos na Splay Tree. A personalização
+do ranking pelo perfil continua opcional e não está implementada.
+
+O dataset não é distribuído neste repositório: é necessário baixá-lo e executar
+a importação. Os testes usam amostras sintéticas no formato oficial FMA;
+qualidade de recomendação e reprodução de todos os áudios devem ser avaliadas
+com os arquivos reais.
+
+```bash
+python -m unittest discover -s tests -p 'test_dataset.py' -v
+./build/benchmark_similarity  # usa o CSV processado, executado na raiz
+```
+
+O benchmark gera Recall@10 e tempos para diferentes janelas, incluindo busca
+exaustiva. Structures Lab exibe os resultados salvos. Para uma demonstração
+sintética separada, use `./build/benchmark_similarity --synthetic`.
 
 ## Equipe
 
 Cinco integrantes, com divisão de responsabilidades descrita no plano (§39):
 Skip List / Acoustic Key, Splay Tree, processamento do FMA, Streamlit, e
 benchmarks / integração.
-# projetoed2

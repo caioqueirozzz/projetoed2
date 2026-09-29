@@ -10,6 +10,7 @@ struct SkipNode {
     std::uint64_t key = 0;
     int trackId = 0;
     std::vector<SkipNode*> forward;
+    SkipNode* backward = nullptr;  // previous node at level 0, excluding sentinel
 
     SkipNode(std::uint64_t k, int id, int level)
         : key(k), trackId(id), forward(level + 1, nullptr) {}
@@ -42,8 +43,8 @@ public:
     bool remove(std::uint64_t key, int trackId);
     SkipNode* search(std::uint64_t key);
 
-    /// Return up to `numberOfCandidates` trackIds whose keys are closest to
-    /// `key`, gathered by walking outward from the search position.
+    /// Return an ordered window around `key` in expected O(log N + C).
+    /// Fill from the other side when a boundary is reached (C = budget).
     std::vector<int> nearest(std::uint64_t key, int numberOfCandidates);
 
     /// In-order traversal of all trackIds (level-1 chain).

@@ -11,6 +11,7 @@ Selected features (44 dims total):
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 # (feature_group, statistic, expected_number_of_columns)
@@ -57,7 +58,12 @@ def select_features(features: pd.DataFrame) -> pd.DataFrame:
         if expected_n == 1:
             sub.columns = [f"{group}_{stat}"]
         else:
-            sub.columns = [f"{group}_{stat}_{c}" for c in sub.columns]
+            indices = [int(c) for c in sub.columns]
+            if sorted(indices) != list(range(1, expected_n + 1)):
+                raise ValueError(f"Invalid coefficient indices for {group}: {indices}")
+            sub.columns = indices
+            sub = sub.reindex(columns=range(1, expected_n + 1))
+            sub.columns = [f"{group}_{stat}_{c:02d}" for c in sub.columns]
 
         parts.append(sub)
 
@@ -67,28 +73,25 @@ def select_features(features: pd.DataFrame) -> pd.DataFrame:
 
 
 def handle_missing(features: pd.DataFrame, col_threshold: float = 0.5) -> pd.DataFrame:
-    """Remove rows/columns with missing feature values.
+    """Drop invalid rows while preserving the fixed 44-feature C++ contract.
 
-    Policy (plan §8 — rationale documented here for the report):
-      1. Drop columns with > col_threshold fraction NaN — this indicates a
-         broken feature extractor (affects all tracks), not occasional corrupt
-         audio. col_threshold=0.5 is conservative; in practice the FMA Medium
-         features have near-zero column missingness.
-      2. Drop rows with any remaining NaN — acoustic analysis of a corrupt
-         audio file cannot be reliably imputed without distorting the feature
-         space used by AcousticKey and topK.
-
-    In practice < 1 % of FMA Medium tracks are affected by step 2.
+    A mostly missing column is an input error; dropping it would silently shift
+    AcousticKey dimensions. Non-numeric values and infinities count as missing.
     """
+    if features.empty or features.shape[1] != 44:
+        raise ValueError("Expected a non-empty matrix with exactly 44 features")
+    features = features.apply(pd.to_numeric, errors="coerce").replace(
+        [np.inf, -np.inf], np.nan
+    )
     col_missing = features.isnull().mean()
     bad_cols = col_missing[col_missing > col_threshold].index.tolist()
     if bad_cols:
-        features = features.drop(columns=bad_cols)
-        print(f"[handle_missing] dropped {len(bad_cols)} column(s) with "
-              f">{col_threshold:.0%} missing values")
+        raise ValueError(f"Features with >{col_threshold:.0%} invalid values: {bad_cols}")
 
     n_before = len(features)
     features = features.dropna()
+    if features.empty:
+        raise ValueError("No tracks with 44 valid features remain")
     n_dropped = n_before - len(features)
     if n_dropped:
         print(f"[handle_missing] dropped {n_dropped} track(s) with any NaN "

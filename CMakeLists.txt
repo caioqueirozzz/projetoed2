@@ -17,6 +17,7 @@ add_library(ame_core
     core/src/splay_tree.cpp
     core/src/acoustic_key.cpp
     core/src/similarity.cpp
+    core/src/dataset.cpp
 )
 target_include_directories(ame_core PUBLIC core/include)
 
@@ -37,3 +38,17 @@ foreach(bench_name benchmark_skiplist benchmark_splay benchmark_similarity)
     add_executable(${bench_name} benchmark/${bench_name}.cpp)
     target_link_libraries(${bench_name} PRIVATE ame_core)
 endforeach()
+
+# Python integration tests exercise the actual multi-index FMA CSV contract.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import pandas, numpy"
+                    RESULT_VARIABLE FMA_PYTHON_DEPS OUTPUT_QUIET ERROR_QUIET)
+    if(FMA_PYTHON_DEPS EQUAL 0)
+        add_test(NAME test_dataset COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+                 -s tests -p test_dataset.py -v)
+        set_tests_properties(test_dataset PROPERTIES
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            ENVIRONMENT "AME_CORE_BINARY=$<TARGET_FILE:ame_core_app>")
+    endif()
+endif()

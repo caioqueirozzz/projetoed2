@@ -15,14 +15,14 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
-#include <fstream>
+#include <memory>
 #include <iostream>
 #include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-#include "acoustic_key.hpp"
+#include "dataset.hpp"
 #include "similarity.hpp"
 #include "skip_list.hpp"
 #include "splay_tree.hpp"
@@ -30,9 +30,8 @@
 
 // ── global state ──────────────────────────────────────────────────────────────
 
-static ame::AcousticKey g_keyer(6, 10);
-static ame::SkipList    g_skipList;
-static ame::SplayTree   g_profile;
+static auto g_skipList = std::make_unique<ame::SkipList>();
+static auto g_profile = std::make_unique<ame::SplayTree>();
 static std::vector<ame::Track>              g_tracks;
 static std::unordered_map<int, std::size_t> g_trackIdx;  // id → index in g_tracks
 
@@ -101,85 +100,24 @@ static double elapsedMs(Clock::time_point t0) {
     return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
 }
 
-// ── CSV parser ────────────────────────────────────────────────────────────────
-//
-// Handles RFC-4180 quoting: quoted fields may contain commas; two consecutive
-// double-quotes inside a quoted field represent one literal double-quote.
-
-static std::vector<std::string> parseCSVLine(const std::string& line) {
-    std::vector<std::string> fields;
-    std::string cur;
-    bool inQ = false;
-    for (std::size_t i = 0; i < line.size(); ++i) {
-        char c = line[i];
-        if (c == '"') {
-            if (inQ && i + 1 < line.size() && line[i + 1] == '"') {
-                cur += '"'; ++i;
-            } else {
-                inQ = !inQ;
-            }
-        } else if (c == ',' && !inQ) {
-            fields.push_back(cur); cur.clear();
-        } else {
-            cur += c;
-        }
-    }
-    fields.push_back(cur);
-    return fields;
-}
-
-// ── load command ──────────────────────────────────────────────────────────────
-//
-// Format: load <csv_path>
-//
-// tracks_processed.csv column layout (from preprocessing/build_dataset.py):
-//   0: track_id  1: title  2: artist  3: genre  4: audio_path
-//   5-48: 44 normalized feature columns
-
+// Load into temporary state: an invalid CSV must preserve the current index.
 static void handleLoad(const std::string& path) {
-    std::ifstream file(path);
-    if (!file.is_open()) {
-        sendError("Cannot open CSV: " + path); return;
-    }
-
-    g_tracks.clear();
-    g_trackIdx.clear();
-    g_skipList.~SkipList();
-    new (&g_skipList) ame::SkipList();
-
-    std::string headerLine;
-    std::getline(file, headerLine);  // discard header
-
-    static constexpr int FEATURE_OFFSET = 5;
-    static constexpr int FEATURE_COUNT  = 44;
-    static constexpr int MIN_COLS       = FEATURE_OFFSET + FEATURE_COUNT;
-
-    std::string line;
-    while (std::getline(file, line)) {
-        if (line.empty()) continue;
-        auto f = parseCSVLine(line);
-        if (static_cast<int>(f.size()) < MIN_COLS) continue;
-
-        ame::Track t;
-        try { t.id = std::stoi(f[0]); } catch (...) { continue; }
-        t.title     = f[1];
-        t.artist    = f[2];
-        t.genre     = f[3];
-        t.audioPath = f[4];
-
-        t.features.resize(FEATURE_COUNT);
-        for (int i = 0; i < FEATURE_COUNT; ++i) {
-            try   { t.features[i] = std::stod(f[FEATURE_OFFSET + i]); }
-            catch (...) { t.features[i] = 0.0; }
+    try {
+        auto tracks = ame::loadTracksCsv(path);
+        auto index = std::make_unique<ame::SkipList>();
+        std::unordered_map<int, std::size_t> trackIdx;
+        for (std::size_t i = 0; i < tracks.size(); ++i) {
+            trackIdx[tracks[i].id] = i;
+            index->insert(tracks[i].acousticKey, tracks[i].id);
         }
-
-        t.acousticKey = g_keyer.encode(t.features);
-        g_trackIdx[t.id] = g_tracks.size();
-        g_tracks.push_back(std::move(t));
-        g_skipList.insert(g_tracks.back().acousticKey, g_tracks.back().id);
+        g_tracks = std::move(tracks);
+        g_trackIdx = std::move(trackIdx);
+        g_skipList = std::move(index);
+        g_profile = std::make_unique<ame::SplayTree>();
+        send("{\"status\":\"ok\",\"loaded\":" + ji(g_tracks.size()) + "}");
+    } catch (const std::exception& error) {
+        sendError(error.what());
     }
-
-    send("{\"status\":\"ok\",\"loaded\":" + ji(g_tracks.size()) + "}");
 }
 
 // ── search command ────────────────────────────────────────────────────────────
@@ -195,16 +133,22 @@ static void handleSearch(int queryId, int numCandidates, int topK) {
         sendError("track_id " + std::to_string(queryId) + " not in dataset"); return;
     }
 
+    if (numCandidates <= 0 || topK <= 0) {
+        sendError("Candidate count and top_k must be positive"); return;
+    }
     const ame::Track& q = g_tracks[it->second];
 
-    g_skipList.metrics().reset();
+    const auto compsBefore = g_skipList->metrics().comparisons;
     auto t0 = Clock::now();
-    const auto candidates = g_skipList.nearest(q.acousticKey, numCandidates);
+    const auto budget = std::min<std::size_t>(numCandidates, g_tracks.size() - 1);
+    auto candidates = g_skipList->nearest(q.acousticKey, static_cast<int>(budget + 1));
+    candidates.erase(std::remove(candidates.begin(), candidates.end(), queryId), candidates.end());
+    if (candidates.size() > budget) candidates.resize(budget);
     const double slMs  = elapsedMs(t0);
-    const std::uint64_t slComps = g_skipList.metrics().comparisons;
+    const std::uint64_t slComps = g_skipList->metrics().comparisons - compsBefore;
 
     auto t1 = Clock::now();
-    const auto results = ame::topK(q.features, g_tracks, candidates, topK);
+    const auto results = ame::topK(q.features, g_tracks, candidates, topK, &g_trackIdx);
     const double simMs = elapsedMs(t1);
 
     std::ostringstream oss;
@@ -235,34 +179,37 @@ static void handleSearch(int queryId, int numCandidates, int topK) {
 // per-access metrics and ASCII snapshots before/after splay for §27 views.
 
 static void handleAccess(int trackId) {
-    std::string treeBefore = g_profile.getRoot()
-        ? limitAscii(g_profile.toAscii())
+    if (trackId <= 0 || (!g_tracks.empty() && g_trackIdx.count(trackId) == 0)) {
+        sendError("Unknown or invalid track_id"); return;
+    }
+    std::string treeBefore = g_profile->getRoot()
+        ? limitAscii(g_profile->toAscii())
         : "(empty — first access)";
 
-    const auto mBefore = g_profile.metrics();
+    const auto mBefore = g_profile->metrics();
 
-    g_profile.access(trackId);
+    g_profile->access(trackId);
 
-    const auto mAfter = g_profile.metrics();
+    const auto mAfter = g_profile->metrics();
     const std::uint64_t accessComps = mAfter.comparisons - mBefore.comparisons;
     const std::uint64_t accessRots  = mAfter.rotations   - mBefore.rotations;
 
-    const ame::SplayNode* root = g_profile.getRoot();
+    const ame::SplayNode* root = g_profile->getRoot();
     const int playCount = root ? root->playCount : 1;
     const int rootId    = root ? root->trackId   : trackId;
-    const std::string treeAfter = limitAscii(g_profile.toAscii());
+    const std::string treeAfter = limitAscii(g_profile->toAscii());
 
     std::ostringstream oss;
     oss << "{\"status\":\"ok\","
         << "\"track_id\":"     << ji(trackId)                       << ","
-        << "\"step\":"         << js(stepName(g_profile.lastStep())) << ","
+        << "\"step\":"         << js(stepName(g_profile->lastStep())) << ","
         << "\"depth_before\":" << ji(mAfter.lastDepthBefore)        << ","
         << "\"depth_after\":"  << ji(mAfter.lastDepthAfter)         << ","
         << "\"play_count\":"   << ji(playCount)                      << ","
         << "\"rotations\":"    << ji(accessRots)                     << ","
         << "\"comparisons\":"  << ji(accessComps)                    << ","
         << "\"root_id\":"      << ji(rootId)                         << ","
-        << "\"height\":"       << ji(g_profile.height())             << ","
+        << "\"height\":"       << ji(g_profile->height())             << ","
         << "\"tree_before\":"  << js(treeBefore)                     << ","
         << "\"tree_after\":"   << js(treeAfter)
         << "}";
@@ -272,14 +219,14 @@ static void handleAccess(int trackId) {
 // ── splay_state command ───────────────────────────────────────────────────────
 
 static void handleSplayState() {
-    const ame::SplayNode* root = g_profile.getRoot();
-    const std::string tree = root ? limitAscii(g_profile.toAscii()) : "(empty)";
+    const ame::SplayNode* root = g_profile->getRoot();
+    const std::string tree = root ? limitAscii(g_profile->toAscii()) : "(empty)";
 
     std::ostringstream oss;
     oss << "{\"status\":\"ok\","
         << "\"root_id\":"    << ji(root ? root->trackId : -1)            << ","
-        << "\"height\":"     << ji(g_profile.height())                    << ","
-        << "\"size\":"       << ji(splayTreeSize(g_profile.getRoot()))    << ","
+        << "\"height\":"     << ji(g_profile->height())                    << ","
+        << "\"size\":"       << ji(splayTreeSize(g_profile->getRoot()))    << ","
         << "\"tree_ascii\":" << js(tree)
         << "}";
     send(oss.str());
@@ -288,10 +235,10 @@ static void handleSplayState() {
 // ── skiplist_state command ────────────────────────────────────────────────────
 
 static void handleSkipListState() {
-    const auto& m = g_skipList.metrics();
+    const auto& m = g_skipList->metrics();
     std::ostringstream oss;
     oss << "{\"status\":\"ok\","
-        << "\"size\":"        << ji(g_skipList.size()) << ","
+        << "\"size\":"        << ji(g_skipList->size()) << ","
         << "\"comparisons\":" << ji(m.comparisons)     << ","
         << "\"insertions\":"  << ji(m.insertions)       << ","
         << "\"searches\":"    << ji(m.searches)
@@ -315,7 +262,8 @@ int main() {
 
         if (cmd == "load") {
             std::string path;
-            if (!(iss >> path)) { sendError("load: missing csv_path"); continue; }
+            std::getline(iss >> std::ws, path);
+            if (path.empty()) { sendError("load: missing csv_path"); continue; }
             handleLoad(path);
 
         } else if (cmd == "search") {

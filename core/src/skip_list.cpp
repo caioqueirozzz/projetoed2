@@ -1,5 +1,6 @@
 #include "skip_list.hpp"
 
+#include <algorithm>
 #include <deque>
 #include <random>
 
@@ -66,6 +67,9 @@ void SkipList::insert(std::uint64_t key, int trackId) {
         update[i]->forward[i] = node;
     }
 
+    node->backward = update[0] == head_ ? nullptr : update[0];
+    if (node->forward[0]) node->forward[0]->backward = node;
+
     ++size_;
     ++metrics_.insertions;
 }
@@ -91,6 +95,7 @@ bool SkipList::remove(std::uint64_t key, int trackId) {
         if (update[i]->forward[i] != target) break;
         update[i]->forward[i] = target->forward[i];
     }
+    if (target->forward[0]) target->forward[0]->backward = target->backward;
     delete target;
 
     while (currentLevel_ > 0 && !head_->forward[currentLevel_])
@@ -118,37 +123,34 @@ SkipNode* SkipList::search(std::uint64_t key) {
 }
 
 std::vector<int> SkipList::nearest(std::uint64_t key, int numberOfCandidates) {
-    // Find the predecessor: the last node with acoustic key < query key.
+    ++metrics_.searches;
+    if (numberOfCandidates <= 0 || size_ == 0) return {};
+    const int budget = std::min(numberOfCandidates, size_);
     SkipNode* pred = head_;
-    for (int i = currentLevel_; i >= 0; --i)
-        while (pred->forward[i] && pred->forward[i]->key < key)
+    for (int i = currentLevel_; i >= 0; --i) {
+        while (pred->forward[i]) {
+            ++metrics_.comparisons;
+            if (pred->forward[i]->key >= key) break;
             pred = pred->forward[i];
-
-    // Left window: walk level-0 from head to pred (inclusive), keeping only
-    // the last (numberOfCandidates / 2) trackIds in a sliding deque.
-    // This is O(n) but numberOfCandidates is typically 50-5000, and we only
-    // do it once per query against ~25k tracks.
-    const int half = numberOfCandidates / 2;
-    std::deque<int> leftIds;
-    if (pred != head_) {
-        for (SkipNode* n = head_->forward[0]; n != pred->forward[0]; n = n->forward[0]) {
-            leftIds.push_back(n->trackId);
-            if ((int)leftIds.size() > half)
-                leftIds.pop_front();
         }
     }
 
-    std::vector<int> result;
-    result.reserve(numberOfCandidates);
-
-    for (int id : leftIds)
-        result.push_back(id);
-
-    // Right window: walk forward from pred->forward[0] (key >= query key).
-    for (SkipNode* n = pred->forward[0]; n && (int)result.size() < numberOfCandidates; n = n->forward[0])
-        result.push_back(n->trackId);
-
-    return result;
+    SkipNode* left = pred == head_ ? nullptr : pred;
+    SkipNode* right = pred->forward[0];
+    std::deque<int> window;
+    while (left && static_cast<int>(window.size()) < budget / 2) {
+        window.push_front(left->trackId);
+        left = left->backward;
+    }
+    while (right && static_cast<int>(window.size()) < budget) {
+        window.push_back(right->trackId);
+        right = right->forward[0];
+    }
+    while (left && static_cast<int>(window.size()) < budget) {
+        window.push_front(left->trackId);
+        left = left->backward;
+    }
+    return {window.begin(), window.end()};
 }
 
 std::vector<int> SkipList::traverse() const {

@@ -26,7 +26,7 @@ double euclidean(const std::vector<double>& a, const std::vector<double>& b) {
 // Rank `candidateIds` against `query` and return the K closest (plan §14).
 //
 // Algorithm (bounded max-heap, O(C log K) where C = |candidateIds|):
-//   1. Build a one-time lookup: trackId → index in `tracks`  O(N)
+//   1. Reuse the supplied ID index, or build an O(N) local map if absent.
 //   2. For each candidate, compute squaredEuclidean (cheaper than sqrt, and
 //      monotonic so it ranks identically).
 //   3. Keep a max-heap of at most K entries. The top is always the worst
@@ -41,28 +41,32 @@ double euclidean(const std::vector<double>& a, const std::vector<double>& b) {
 std::vector<SimilarityResult> topK(const std::vector<double>& query,
                                     const std::vector<Track>& tracks,
                                     const std::vector<int>& candidateIds,
-                                    std::size_t k) {
+                                    std::size_t k,
+                                    const std::unordered_map<int, std::size_t>* trackIndex) {
     if (k == 0 || candidateIds.empty() || tracks.empty()) return {};
 
-    // Build trackId → vector index map once for O(1) feature-vector lookup.
+    // Applications/benchmarks reuse their index; standalone callers may omit it.
     std::unordered_map<int, std::size_t> idToIdx;
-    idToIdx.reserve(tracks.size());
-    for (std::size_t i = 0; i < tracks.size(); ++i)
-        idToIdx[tracks[i].id] = i;
+    if (!trackIndex) {
+        idToIdx.reserve(tracks.size());
+        for (std::size_t i = 0; i < tracks.size(); ++i)
+            idToIdx[tracks[i].id] = i;
+        trackIndex = &idToIdx;
+    }
 
     // Max-heap: pair<squaredDistance, trackId> — largest distance on top.
     using Entry = std::pair<double, int>;
     std::priority_queue<Entry> heap;
 
     for (const int id : candidateIds) {
-        const auto it = idToIdx.find(id);
-        if (it == idToIdx.end()) continue;
+        const auto it = trackIndex->find(id);
+        if (it == trackIndex->end()) continue;
 
         const double d2 = squaredEuclidean(query, tracks[it->second].features);
 
         if (heap.size() < k) {
             heap.emplace(d2, id);
-        } else if (d2 < heap.top().first) {
+        } else if (Entry{d2, id} < heap.top()) {
             heap.pop();
             heap.emplace(d2, id);
         }
