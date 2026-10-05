@@ -18,6 +18,7 @@ add_library(ame_core
     core/src/acoustic_key.cpp
     core/src/similarity.cpp
     core/src/dataset.cpp
+    core/src/acoustic_search.cpp
 )
 target_include_directories(ame_core PUBLIC core/include)
 
@@ -27,7 +28,7 @@ target_link_libraries(ame_core_app PRIVATE ame_core)
 
 # ---- Tests -------------------------------------------------------------------
 enable_testing()
-foreach(test_name test_skiplist test_splay test_similarity test_acoustic_key)
+foreach(test_name test_skiplist test_splay test_similarity test_acoustic_key test_regressions)
     add_executable(${test_name} tests/${test_name}.cpp)
     target_link_libraries(${test_name} PRIVATE ame_core)
     add_test(NAME ${test_name} COMMAND ${test_name})
@@ -37,6 +38,7 @@ endforeach()
 foreach(bench_name benchmark_skiplist benchmark_splay benchmark_similarity)
     add_executable(${bench_name} benchmark/${bench_name}.cpp)
     target_link_libraries(${bench_name} PRIVATE ame_core)
+    target_compile_definitions(${bench_name} PRIVATE AME_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 endforeach()
 
 # Python integration tests exercise the actual multi-index FMA CSV contract.
@@ -47,8 +49,20 @@ if(Python3_Interpreter_FOUND)
     if(FMA_PYTHON_DEPS EQUAL 0)
         add_test(NAME test_dataset COMMAND "${Python3_EXECUTABLE}" -m unittest discover
                  -s tests -p test_dataset.py -v)
-        set_tests_properties(test_dataset PROPERTIES
+        add_test(NAME test_benchmarks COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+                 -s tests -p test_benchmarks.py -v)
+        set_tests_properties(test_dataset test_benchmarks PROPERTIES
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
             ENVIRONMENT "AME_CORE_BINARY=$<TARGET_FILE:ame_core_app>")
+    endif()
+endif()
+
+if(Python3_Interpreter_FOUND AND FMA_PYTHON_DEPS EQUAL 0)
+    execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import streamlit.testing.v1"
+                    RESULT_VARIABLE UI_PYTHON_DEPS OUTPUT_QUIET ERROR_QUIET)
+    if(UI_PYTHON_DEPS EQUAL 0)
+        add_test(NAME test_ui COMMAND "${Python3_EXECUTABLE}" -m unittest discover -s tests -p test_ui.py -v)
+        set_tests_properties(test_ui PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                            ENVIRONMENT "AME_CORE_BINARY=$<TARGET_FILE:ame_core_app>")
     endif()
 endif()

@@ -1,4 +1,4 @@
-// Unit tests for the Skip List (plan §41, §49).
+// Unit tests for the Skip List.
 // Lightweight assert-based harness — no external framework required.
 
 #include <algorithm>

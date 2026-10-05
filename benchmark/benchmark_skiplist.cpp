@@ -1,153 +1,73 @@
-// Benchmark: Skip List vs sorted vector + binary_search vs std::map (plan §32).
-// Emits benchmark_skiplist.csv into benchmark/results/.
-//
-// Dataset sizes: 1k, 5k, 10k, 15k, 20k, 25k
-// Operations   : insert, search (hit), remove, nearest (SkipList only)
-// Metrics      : time_ms, comparisons
-
-#include <algorithm>
-#include <chrono>
-#include <cmath>
-#include <cstdint>
-#include <filesystem>
-#include <fstream>
-#include <iostream>
+#include "bench_support.hpp"
+#include "skip_list.hpp"
 #include <map>
 #include <random>
-#include <vector>
+#include <iostream>
 
-#include "skip_list.hpp"
-
-using Clock = std::chrono::high_resolution_clock;
-
-static double elapsedMs(Clock::time_point t0) {
-    return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
-}
-
-int main() {
-    namespace fs = std::filesystem;
-    fs::create_directories("../benchmark/results");
-
-    std::ofstream csv("../benchmark/results/benchmark_skiplist.csv");
-    csv << "structure,n,operation,time_ms,comparisons\n";
-
-    const std::vector<int> sizes = {1000, 5000, 10000, 15000, 20000, 25000};
-    const int EXTRA = 100;  // keys used for search / remove queries
-
-    for (int n : sizes) {
-        std::cout << "n=" << n << " ..." << std::flush;
-
-        // Generate n + EXTRA random uint64_t keys (deterministic, seed 42).
-        std::mt19937_64 rng(42);
-        std::uniform_int_distribution<std::uint64_t> dist(1, UINT64_MAX);
-
-        std::vector<std::uint64_t> keys;
-        keys.reserve(n + EXTRA);
-        for (int i = 0; i < n + EXTRA; ++i) keys.push_back(dist(rng));
-
-        // keys[0..n-1]        → inserted into each structure
-        // keys[n..n+EXTRA-1]  → used as query keys for nearest
-
-        // ── Skip List ─────────────────────────────────────────────────────────
-        {
-            ame::SkipList sl;
-
-            // insert
-            sl.metrics().reset();
-            auto t0 = Clock::now();
-            for (int i = 0; i < n; ++i) sl.insert(keys[i], i);
-            double ins_ms  = elapsedMs(t0);
-            long long ins_cmp = (long long)sl.metrics().comparisons;
-            csv << "SkipList," << n << ",insert," << ins_ms << "," << ins_cmp << "\n";
-
-            // search (hit: first EXTRA inserted keys)
-            sl.metrics().reset();
-            t0 = Clock::now();
-            for (int i = 0; i < EXTRA; ++i) sl.search(keys[i]);
-            double srch_ms  = elapsedMs(t0);
-            long long srch_cmp = (long long)sl.metrics().comparisons;
-            csv << "SkipList," << n << ",search," << srch_ms << "," << srch_cmp << "\n";
-
-            // nearest — 100 queries with fresh keys not in the list
-            sl.metrics().reset();
-            t0 = Clock::now();
-            for (int i = n; i < n + EXTRA; ++i) sl.nearest(keys[i], 100);
-            double near_ms  = elapsedMs(t0);
-            long long near_cmp = (long long)sl.metrics().comparisons;
-            csv << "SkipList," << n << ",nearest," << near_ms << "," << near_cmp << "\n";
-
-            // remove (same first EXTRA keys, trackId = their index)
-            sl.metrics().reset();
-            t0 = Clock::now();
-            for (int i = 0; i < EXTRA; ++i) sl.remove(keys[i], i);
-            double rem_ms  = elapsedMs(t0);
-            long long rem_cmp = (long long)sl.metrics().comparisons;
-            csv << "SkipList," << n << ",remove," << rem_ms << "," << rem_cmp << "\n";
-        }
-
-        // ── Sorted vector (insertion-sort style, binary-search lookup) ────────
-        {
-            std::vector<std::uint64_t> vec;
-            vec.reserve(n);
-
-            long long ins_cmp = 0;
-            auto t0 = Clock::now();
-            for (int i = 0; i < n; ++i) {
-                auto pos = std::lower_bound(vec.begin(), vec.end(), keys[i]);
-                // binary search visits ≈ log2(current size + 1) nodes
-                int sz = (int)vec.size();
-                ins_cmp += (sz > 0) ? (long long)std::ceil(std::log2(sz + 1)) : 0;
-                vec.insert(pos, keys[i]);
+int main(int argc,char** argv) {
+ try {
+    auto csv=openCsv(outputDir(argc,argv)/"benchmark_skiplist.csv");
+    csv<<"structure,n,repeat,seed,operation,operations,time_ms,comparisons,memory_bytes_estimate,checksum\n";
+    const int repeats=argc>2?std::stoi(argv[2]):5;
+    if(repeats<1) throw std::invalid_argument("repeats must be positive");
+    for(int n:{1000,5000,10000,15000,20000,25000}) for(int rep=0;rep<repeats;++rep) {
+        unsigned seed=42+rep; std::mt19937_64 rng(seed);
+        std::vector<std::uint64_t> keys(n);
+        for(int i=0;i<n;++i) keys[i]=static_cast<std::uint64_t>(i+1)*100;
+        std::shuffle(keys.begin(),keys.end(),rng);
+        const int queries=100;
+        auto row=[&](const char* structure,const char* op,int count,double elapsed,std::uint64_t comparisons,std::size_t memory,std::uint64_t checksum) {
+            csv<<structure<<','<<n<<','<<rep<<','<<seed<<','<<op<<','<<count<<','<<elapsed<<','<<comparisons<<','<<memory<<','<<checksum<<'\n';
+        };
+        ame::SkipList sl(16,.5,seed);
+        std::vector<std::uint64_t> vec; vec.reserve(n);
+        std::uint64_t vc=0,mc=0;
+        std::map<std::uint64_t,int,CountLess> map(CountLess{&mc});
+        for(const std::string op:{"insert","search","nearest","update","remove"}) {
+            sl.metrics().reset(); std::uint64_t checksum=0;
+            auto t=BenchClock::now();
+            if(op=="insert") for(int i=0;i<n;++i) sl.insert(keys[i],i);
+            else for(int i=0;i<queries;++i) {
+                if(op=="search") { auto* found=sl.search(keys[i]); if(found) checksum+=found->key; }
+                if(op=="nearest") for(int id:sl.nearest(keys[i],100)) checksum+=keys[id];
+                if(op=="update") checksum+=sl.update(keys[i],i,keys[i]+1);
+                if(op=="remove") checksum+=sl.remove(keys[i]+1,i);
             }
-            double ins_ms = elapsedMs(t0);
-            csv << "SortedVector," << n << ",insert," << ins_ms << "," << ins_cmp << "\n";
-
-            long long srch_cmp = 0;
-            t0 = Clock::now();
-            for (int i = 0; i < EXTRA; ++i) {
-                std::lower_bound(vec.begin(), vec.end(), keys[i]);
-                srch_cmp += (long long)std::ceil(std::log2((int)vec.size() + 1));
+            double elapsed=benchMs(t); row("SkipList",op.c_str(),op=="insert"?n:queries,elapsed,sl.metrics().comparisons,sl.memoryBytes(),checksum);
+            vc=0; checksum=0; t=BenchClock::now();
+            if(op=="insert") for(auto key:keys) vec.insert(std::lower_bound(vec.begin(),vec.end(),key,CountLess{&vc}),key);
+            else for(int i=0;i<queries;++i) {
+                auto it=std::lower_bound(vec.begin(),vec.end(),keys[i]+(op=="remove"),CountLess{&vc});
+                if(op=="search" && it!=vec.end()) {++vc;if(*it==keys[i])checksum+=*it;}
+                if(op=="nearest") {
+                    auto pos=it-vec.begin(); auto begin=std::max<std::ptrdiff_t>(0,pos-50);
+                    auto end=std::min<std::ptrdiff_t>(vec.size(),begin+100);begin=std::max<std::ptrdiff_t>(0,end-100);
+                    for(auto j=begin;j<end;++j)checksum+=vec[j];
+                }
+                if(op=="update" || op=="remove") {
+                    ++vc;
+                    if(it!=vec.end() && *it==keys[i]+(op=="remove")) {vec.erase(it);++checksum;}
+                    if(op=="update") vec.insert(std::lower_bound(vec.begin(),vec.end(),keys[i]+1,CountLess{&vc}),keys[i]+1);
+                }
             }
-            double srch_ms = elapsedMs(t0);
-            csv << "SortedVector," << n << ",search," << srch_ms << "," << srch_cmp << "\n";
-
-            long long rem_cmp = 0;
-            t0 = Clock::now();
-            for (int i = 0; i < EXTRA; ++i) {
-                auto pos = std::lower_bound(vec.begin(), vec.end(), keys[i]);
-                rem_cmp += (long long)std::ceil(std::log2((int)vec.size() + 1));
-                if (pos != vec.end() && *pos == keys[i]) vec.erase(pos);
+            elapsed=benchMs(t);row("SortedVector",op.c_str(),op=="insert"?n:queries,elapsed,vc,sizeof(vec)+vec.capacity()*sizeof(std::uint64_t),checksum);
+            mc=0;checksum=0;t=BenchClock::now();
+            if(op=="insert") for(int i=0;i<n;++i)map.emplace(keys[i],i);
+            else for(int i=0;i<queries;++i) {
+                if(op=="search") {auto it=map.find(keys[i]);if(it!=map.end())checksum+=it->first;}
+                if(op=="nearest") {
+                    auto right=map.lower_bound(keys[i]);auto left=right;int back=0;
+                    while(left!=map.begin() && back<50){--left;++back;}
+                    int count=0;auto it=left;
+                    for(;it!=map.end()&&count<100;++it,++count)checksum+=it->first;
+                    while(count<100&&left!=map.begin()){--left;checksum+=left->first;++count;}
+                }
+                if(op=="update") {auto it=map.find(keys[i]);if(it!=map.end()){map.erase(it);map.emplace(keys[i]+1,i);++checksum;}}
+                if(op=="remove") checksum+=map.erase(keys[i]+1);
             }
-            double rem_ms = elapsedMs(t0);
-            csv << "SortedVector," << n << ",remove," << rem_ms << "," << rem_cmp << "\n";
+            elapsed=benchMs(t);row("StdMap",op.c_str(),op=="insert"?n:queries,elapsed,mc,sizeof(map)+map.size()*(sizeof(std::pair<const std::uint64_t,int>)+4*sizeof(void*)),checksum);
         }
-
-        // ── std::map (RB-tree; comparisons approximated as log2(n)) ──────────
-        {
-            std::map<std::uint64_t, int> m;
-
-            auto t0 = Clock::now();
-            for (int i = 0; i < n; ++i) m.emplace(keys[i], i);
-            double ins_ms = elapsedMs(t0);
-            long long ins_cmp = n > 1 ? (long long)(n * std::log2(n)) : 0;
-            csv << "StdMap," << n << ",insert," << ins_ms << "," << ins_cmp << "\n";
-
-            long long per_query = n > 1 ? (long long)std::ceil(std::log2(n)) : 1;
-
-            t0 = Clock::now();
-            for (int i = 0; i < EXTRA; ++i) m.find(keys[i]);
-            double srch_ms = elapsedMs(t0);
-            csv << "StdMap," << n << ",search," << srch_ms << "," << EXTRA * per_query << "\n";
-
-            t0 = Clock::now();
-            for (int i = 0; i < EXTRA; ++i) m.erase(keys[i]);
-            double rem_ms = elapsedMs(t0);
-            csv << "StdMap," << n << ",remove," << rem_ms << "," << EXTRA * per_query << "\n";
-        }
-
-        std::cout << " done\n";
     }
-
-    std::cout << "Wrote benchmark/results/benchmark_skiplist.csv\n";
-    return 0;
+    std::cout<<"Skip List benchmark completed\n";
+ } catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
 }

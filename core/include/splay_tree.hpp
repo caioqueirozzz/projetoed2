@@ -6,22 +6,24 @@
 
 namespace ame {
 
-/// One node of the Splay Tree, keyed by trackId (plan §18).
+/// One laboratory node of the Splay Tree, keyed by integer ID.
 struct SplayNode {
     int trackId = 0;
-    int playCount = 0;
+    int accessCount = 0;
+    int subtreeSize = 1;
+    int subtreeHeight = 0;
 
     SplayNode* left = nullptr;
     SplayNode* right = nullptr;
     SplayNode* parent = nullptr;
 
-    explicit SplayNode(int id) : trackId(id), playCount(1) {}
+    explicit SplayNode(int id) : trackId(id), accessCount(1) {}
 };
 
-/// Type of the last splay step performed, for the visualization (plan §19, §27).
+/// Type of the last splay step performed, for the laboratory visualization.
 enum class SplayStep { None, Zig, ZigZig, ZigZag };
 
-/// Metrics collected per access, surfaced in the Playback Profile page (§26).
+/// Metrics collected per operation, surfaced in Structures Lab.
 struct SplayMetrics {
     std::uint64_t comparisons = 0;
     std::uint64_t rotations = 0;
@@ -31,9 +33,9 @@ struct SplayMetrics {
     void reset() { *this = SplayMetrics{}; }
 };
 
-/// Self-adjusting BST modelling the user's recent playback pattern (plan §17).
-/// Every access splays the touched track to the root, exploiting temporal
-/// locality so recently played tracks stay shallow.
+/// Self-adjusting BST for laboratory experiments and access benchmarks.
+/// Every access splays the touched node to the root, exploiting temporal
+/// locality so recently accessed nodes stay shallow.
 class SplayTree {
 public:
     SplayTree() = default;
@@ -46,15 +48,16 @@ public:
     SplayNode* search(int trackId);
     bool remove(int trackId);
 
-    /// Register a playback/selection: find (or insert) the track, bump its
-    /// playCount, and splay it to the root.
+    /// Find (or insert) the node, increment its access count, and splay it.
     void access(int trackId);
 
     SplayNode* getRoot() const { return root_; }
     int height() const;
 
-    /// Pretty-printed tree snapshot (for the before/after views in §27).
-    std::string toAscii() const;
+    /// Pretty-printed tree snapshot for the laboratory before/after views.
+    std::string toAscii(std::size_t maxNodes = 40) const;
+    int size() const { return root_ ? root_->subtreeSize : 0; }
+    const std::vector<SplayStep>& steps() const { return steps_; }
 
     SplayStep lastStep() const { return lastStep_; }
     const SplayMetrics& metrics() const { return metrics_; }
@@ -65,10 +68,14 @@ private:
     void rotateRight(SplayNode* node);
     void splay(SplayNode* node);
     int depthOf(SplayNode* node) const;
+    void beginOperation();
+    static void refresh(SplayNode* node);
+    static void refreshUp(SplayNode* node);
 
     SplayNode* root_ = nullptr;
     SplayStep lastStep_ = SplayStep::None;
     SplayMetrics metrics_;
+    std::vector<SplayStep> steps_;
 };
 
 }  // namespace ame

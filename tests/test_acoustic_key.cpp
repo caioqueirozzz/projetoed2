@@ -1,4 +1,4 @@
-// Unit tests for the Acoustic Key (plan §43).
+// Unit tests for the Acoustic Key.
 // All expected values are derived analytically and annotated inline.
 
 #include <cassert>
@@ -131,7 +131,7 @@ static void test_key_in_valid_range() {
     const std::uint64_t mk = maxKey(6, 10);     // (1<<60)-1
 
     const std::vector<std::vector<double>> cases{
-        {0.81, 0.22, 0.73, 0.51, 0.62, 0.31},  // plan §11 example
+        {0.81, 0.22, 0.73, 0.51, 0.62, 0.31},  // example
         {0.0,  0.0,  0.0,  0.0,  0.0,  0.0},
         {1.0,  1.0,  1.0,  1.0,  1.0,  1.0},
         {0.5,  0.5,  0.5,  0.5,  0.5,  0.5},
@@ -149,7 +149,7 @@ static void test_key_in_valid_range() {
 // that are far apart in feature space should generally produce larger key
 // differences than vectors that are close.
 //
-// We test a concrete, unambiguous case (plan §43: "verify empirically that
+// We test a concrete, unambiguous case ("verify empirically that
 // acoustically close tracks appear close in ordering"):
 //
 //   dims=2, bits=4 (maxVal=15)
@@ -227,17 +227,16 @@ static void test_monotone_single_axis() {
     check(everIncreased, "key strictly increases somewhere as dim 0 sweeps 0→1");
 }
 
-// ── plan example ─────────────────────────────────────────────────────────────
+// ── default configuration example ────────────────────────────────────────────
 //
-// The plan (§11) shows the 6-dimensional default: (6, 10) configuration
-// producing quantized values like [829, 225, 747, 522, 634, 317].
+// The default configuration uses 6 dimensions and 10 bits per dimension.
+// Example quantized values: [829, 225, 747, 522, 634, 317].
 // We verify that the encoder produces a non-zero, bounded key.
 
-static void test_plan_example_6d_10bit() {
+static void test_default_example_6d_10bit() {
     ame::AcousticKey k(6, 10);
 
-    // Normalized version of the plan's example values (they were already
-    // quantized; we reverse-normalize to [0, 1] by dividing by maxVal=1023).
+    // Normalize the quantized example values to [0, 1] by dividing by maxVal=1023.
     const double mv = 1023.0;
     const std::vector<double> features{
         829.0 / mv, 225.0 / mv, 747.0 / mv,
@@ -245,8 +244,8 @@ static void test_plan_example_6d_10bit() {
     };
 
     const std::uint64_t key = k.encode(features);
-    check(key > 0,             "plan §11 example features yield a non-zero key");
-    check(key <= maxKey(6,10), "plan §11 example key is within valid range");
+    check(key > 0,             "example features yield a non-zero key");
+    check(key <= maxKey(6,10), "example key is within valid range");
 }
 
 // ── main ──────────────────────────────────────────────────────────────────────
@@ -263,7 +262,7 @@ int main() {
     test_key_in_valid_range();
     test_locality_key_distance_grows_with_euclidean_distance();
     test_monotone_single_axis();
-    test_plan_example_6d_10bit();
+    test_default_example_6d_10bit();
 
     std::cout << "test_acoustic_key: all tests passed\n";
     return 0;

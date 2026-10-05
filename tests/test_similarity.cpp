@@ -1,4 +1,4 @@
-// Unit tests for the similarity engine (plan §44, §49).
+// Unit tests for the similarity engine.
 // Includes an integration test that exercises the full search pipeline:
 // AcousticKey → SkipList::nearest → topK.
 
@@ -6,6 +6,7 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <stdexcept>
 #include <numeric>
 #include <vector>
 
@@ -37,8 +38,9 @@ static void test_squared_euclidean() {
           "squaredEuclidean: 3-4-0 triangle");
     check(ame::squaredEuclidean({1,2,3}, {1,2,3}) == 0.0,
           "squaredEuclidean: same vector is 0");
-    check(ame::squaredEuclidean({0}, {1,0,0}) == 1.0,
-          "squaredEuclidean: shorter vector pads implicitly");
+    bool rejected = false;
+    try { ame::squaredEuclidean({0}, {1,0,0}); } catch (const std::invalid_argument&) { rejected = true; }
+    check(rejected, "mismatched dimensions are rejected");
 }
 
 static void test_euclidean() {
@@ -143,7 +145,7 @@ static void test_topk_excludes_farther_tracks() {
         check(r.trackId != 30, "farthest track (id 30) is excluded");
 }
 
-// ── brute-force vs approximate (Recall@K concept from plan §16) ───────────────
+// ── brute-force vs approximate (Recall@K) ───────────────
 //
 // When ALL tracks are passed as candidates the result is exact (ground truth).
 // When only a subset is passed the result is approximate. The test verifies:
@@ -183,14 +185,14 @@ static void test_recall_full_candidate_set_equals_brute_force() {
         if (std::find(exactIds.begin(), exactIds.end(), r.trackId) != exactIds.end())
             ++hits;
     }
-    check(hits > 0, "approximate result has non-zero recall vs ground truth");
+    check(hits == 5, "candidate window recovers the entire known top-5");
 }
 
-// ── full pipeline integration test (plan §13) ─────────────────────────────────
+// ── full pipeline integration test ─────────────────────────────────
 //
 // AcousticKey → insert into SkipList → SkipList::nearest → topK
 //
-// This exercises exactly the search flow described in plan §13 with a small
+// This exercises exactly the initial candidate search flow with a small
 // in-memory dataset to verify the components compose correctly.
 
 static void test_pipeline_acoustic_key_skiplist_topk() {

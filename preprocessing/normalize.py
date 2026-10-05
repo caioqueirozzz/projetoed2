@@ -1,4 +1,4 @@
-"""Normalize acoustic features to a common scale (plan §8).
+"""Normalize acoustic features to a common scale.
 
 Acoustic descriptors live on very different scales, so they must be normalized
 before computing Euclidean distances or encoding with AcousticKey.
@@ -23,7 +23,7 @@ def min_max(features: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     and would produce NaN or inf without the guard.
 
     This is the default normalization for the pipeline because AcousticKey
-    requires features in [0, 1] (plan §8).
+    requires features in [0, 1].
     """
     col_min = features.min()
     col_max = features.max()

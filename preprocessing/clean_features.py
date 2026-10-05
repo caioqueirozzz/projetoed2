@@ -1,9 +1,9 @@
-"""Select the acoustic feature subset and handle missing values (plan §7, §8).
+"""Select the acoustic feature subset and handle missing values.
 
 Selected features (44 dims total):
   Indices 0-4:  RMS mean, ZCR mean, Spectral Centroid mean,
                 Spectral Bandwidth mean, Spectral Rolloff mean
-  Index   5:    MFCC mean 01  ← AcousticKey(6,10) uses indices 0-5 (plan §11)
+  Index   5:    MFCC mean 01  ← AcousticKey(6,10) uses indices 0-5
   Indices 6-24: MFCC mean 02-20
   Indices 25-36: Chroma CQT mean 01-12
   Indices 37-43: Spectral Contrast mean 01-07
@@ -16,7 +16,7 @@ import pandas as pd
 
 # (feature_group, statistic, expected_number_of_columns)
 # Ordering is intentional: indices 0-5 are the six AcousticKey dimensions
-# consumed by AcousticKey(6, 10).encode(features) in the C++ core (plan §11).
+# consumed by AcousticKey(6, 10).encode(features) in the C++ core.
 SELECTED_FEATURES: list[tuple[str, str, int]] = [
     ("rmse", "mean", 1),               # index 0  — RMS energy
     ("zcr", "mean", 1),                # index 1  — Zero-crossing rate
@@ -37,7 +37,7 @@ def select_features(features: pd.DataFrame) -> pd.DataFrame:
 
     Returns a DataFrame with flat column names (``mfcc_mean_01``, ``rmse_mean``,
     etc.) where the column order mirrors SELECTED_FEATURES, ensuring that
-    ``features[0:6]`` are the six AcousticKey dimensions (plan §11).
+    ``features[0:6]`` are the six AcousticKey dimensions.
     """
     available = set(features.columns.get_level_values(0))
     parts: list[pd.DataFrame] = []

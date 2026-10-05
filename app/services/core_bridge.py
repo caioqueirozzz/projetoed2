@@ -1,24 +1,27 @@
-"""Bridge between the Streamlit app and the C++ core (plan §4, §5, §45).
+"""Bridge between Music Explorer, Structures Lab and the C++ core.
 
 The C++ binary (``build/ame_core_app``) owns the Skip List and Splay Tree.
 This module communicates with it via a persistent subprocess: one text command
 per stdin line, one JSON object per stdout line.
 
-Commands: load, search, access, splay_state, skiplist_state, quit.
+Commands: load, search, track, skiplist_state, lab_skip, lab_splay, quit.
 
 Usage in Streamlit pages:
-    from services.core_bridge import get_bridge, SearchResult, AccessResult
+    from services.core_bridge import get_bridge
 
     bridge = get_bridge()          # returns None if binary is not built yet
     if bridge is None:
         st.error("C++ core not available — see instructions")
         st.stop()
-    result = bridge.register_access(track_id)
+    results, metrics = bridge.find_similar(track_id)
 """
 
 from __future__ import annotations
 
 import json
+import os
+import selectors
+import threading
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,7 +29,7 @@ from typing import Optional
 
 # Paths resolved relative to this file so the module works from any CWD.
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-BINARY = _REPO_ROOT / "build" / "ame_core_app"
+BINARY = Path(os.environ.get("AME_CORE_BINARY", _REPO_ROOT / "build" / "ame_core_app"))
 from .dataset import PROCESSED_CSV as CSV
 
 
@@ -46,29 +49,13 @@ class SearchMetrics:
     skiplist_ms: float
     similarity_ms: float
     total_ms: float
-
-
-@dataclass
-class AccessResult:
-    track_id: int
-    step: str          # "Zig", "ZigZig", "ZigZag", or "None"
-    depth_before: int
-    depth_after: int
-    play_count: int
-    rotations: int
-    comparisons: int
-    root_id: int
-    height: int
-    tree_before: str
-    tree_after: str
-
-
-@dataclass
-class SplayState:
-    root_id: int
-    height: int
-    size: int
-    tree_ascii: str
+    initial_candidates: int = 0
+    pruned: int = 0
+    visited: int = 0
+    exact: bool = False
+    recall: float = -1
+    brute_force_ms: float = 0
+    acoustic_key: str = ""
 
 
 @dataclass
@@ -85,6 +72,7 @@ class CoreBridge:
     """Manages a single long-lived C++ subprocess for the Streamlit session."""
 
     def __init__(self, binary: Path = BINARY, csv_path: Path = CSV) -> None:
+        self._lock = threading.Lock()
         if not binary.exists():
             raise FileNotFoundError(
                 f"C++ binary not found: {binary}\n"
@@ -125,29 +113,13 @@ class CoreBridge:
     def track_count(self) -> int:
         return self._track_count
 
-    def register_access(self, track_id: int) -> AccessResult:
-        """Register a playback event and return splay metrics + tree snapshots."""
-        resp = self._cmd(f"access {track_id}")
-        self._check(resp)
-        return AccessResult(
-            track_id    = resp["track_id"],
-            step        = resp["step"],
-            depth_before= resp["depth_before"],
-            depth_after = resp["depth_after"],
-            play_count  = resp["play_count"],
-            rotations   = resp["rotations"],
-            comparisons = resp["comparisons"],
-            root_id     = resp["root_id"],
-            height      = resp["height"],
-            tree_before = resp["tree_before"],
-            tree_after  = resp["tree_after"],
-        )
-
     def find_similar(
         self,
         track_id: int,
         num_candidates: int = 500,
         top_k: int = 10,
+        exact: bool = True,
+        evaluate: bool = False,
     ) -> tuple[list[SearchResult], SearchMetrics]:
         """Search for the top-k tracks most similar to track_id.
 
@@ -158,7 +130,7 @@ class CoreBridge:
                 "Dataset not loaded. Provide data/processed/tracks_processed.csv "
                 "and restart the app."
             )
-        resp = self._cmd(f"search {track_id} {num_candidates} {top_k}")
+        resp = self._cmd(f"search {track_id} {num_candidates} {top_k} {'exact' if exact else 'approx'} {int(evaluate)}")
         self._check(resp)
 
         results = [
@@ -173,18 +145,12 @@ class CoreBridge:
             skiplist_ms          = m.get("skiplist_ms", 0.0),
             similarity_ms        = m.get("similarity_ms", 0.0),
             total_ms             = m.get("total_ms", 0.0),
+            initial_candidates=m.get("initial_candidates", 0),
+            pruned=m.get("pruned", 0), visited=m.get("visited", 0),
+            exact=m.get("exact", False), recall=m.get("recall", -1),
+            brute_force_ms=m.get("brute_force_ms", 0), acoustic_key=m.get("acoustic_key", ""),
         )
         return results, metrics
-
-    def get_splay_state(self) -> SplayState:
-        resp = self._cmd("splay_state")
-        self._check(resp)
-        return SplayState(
-            root_id   = resp["root_id"],
-            height    = resp["height"],
-            size      = resp["size"],
-            tree_ascii= resp["tree_ascii"],
-        )
 
     def get_skiplist_state(self) -> SkipListState:
         resp = self._cmd("skiplist_state")
@@ -196,15 +162,36 @@ class CoreBridge:
             searches    = resp["searches"],
         )
 
+    def track_key(self, track_id: int) -> str:
+        response = self._cmd(f"track {track_id}")
+        self._check(response)
+        return response["acoustic_key"]
+
+    def lab_skip(self, operation: str = "state", key: int = 0, track_id: int = 1,
+                 new_key: int = 0) -> dict:
+        if operation not in {"state", "insert", "remove", "search", "update", "traverse", "reset"}:
+            raise ValueError("Unknown operation")
+        response = self._cmd(f"lab_skip {operation} {key} {track_id} {new_key}")
+        self._check(response)
+        return response
+
+    def lab_splay(self, operation: str = "state", track_id: int = 1) -> dict:
+        if operation not in {"state", "insert", "remove", "search", "access", "reset"}:
+            raise ValueError("Unknown operation")
+        response = self._cmd(f"lab_splay {operation} {track_id}")
+        self._check(response)
+        return response
+
+    @property
+    def alive(self) -> bool:
+        return self._proc.poll() is None
+
     def close(self) -> None:
-        """Gracefully shut down the subprocess."""
         try:
-            self._cmd("quit")
-        except Exception:
-            pass
-        try:
+            if self.alive:
+                self._cmd("quit", timeout=2)
             self._proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
+        except Exception:
             self._proc.kill()
             self._proc.wait()
         finally:
@@ -212,21 +199,24 @@ class CoreBridge:
                 if stream:
                     stream.close()
 
-    # ── internal helpers ──────────────────────────────────────────────────────
-
-    def _cmd(self, line: str) -> dict:
-        """Send one command line and return the parsed JSON response."""
+    def _cmd(self, line: str, timeout: float = 30) -> dict:
         if "\n" in line or "\r" in line:
             raise ValueError("Commands and paths must not contain line breaks")
-        if self._proc.poll() is not None:
-            raise RuntimeError("C++ core process is no longer running")
-        assert self._proc.stdin and self._proc.stdout
-        self._proc.stdin.write(line + "\n")
-        self._proc.stdin.flush()
-        raw = self._proc.stdout.readline().strip()
-        if not raw:
-            raise RuntimeError("C++ bridge produced no response (process may have crashed)")
-        return json.loads(raw)
+        with self._lock:
+            if not self.alive:
+                raise RuntimeError("C++ core process is no longer running")
+            assert self._proc.stdin and self._proc.stdout
+            self._proc.stdin.write(line + "\n")
+            self._proc.stdin.flush()
+            with selectors.DefaultSelector() as selector:
+                selector.register(self._proc.stdout, selectors.EVENT_READ)
+                if not selector.select(timeout):
+                    self._proc.kill()
+                    raise RuntimeError("C++ core timed out; reload the page to restart it")
+            raw = self._proc.stdout.readline().strip()
+            if not raw:
+                raise RuntimeError("C++ bridge produced no response")
+            return json.loads(raw)
 
     @staticmethod
     def _check(resp: dict) -> None:
@@ -249,14 +239,17 @@ def get_bridge() -> Optional[CoreBridge]:
     import streamlit as st
 
     stat = CSV.stat() if CSV.is_file() else None
-    signature = (stat.st_mtime_ns, stat.st_size) if stat else None
-    if "bridge" not in st.session_state or st.session_state.get("dataset_signature") != signature:
+    binary_stat = BINARY.stat() if BINARY.is_file() else None
+    signature = ((stat.st_mtime_ns, stat.st_size) if stat else None,
+                 (binary_stat.st_mtime_ns, binary_stat.st_size) if binary_stat else None)
+    current = st.session_state.get("bridge")
+    if current is None or not current.alive or st.session_state.get("dataset_signature") != signature:
         previous = st.session_state.get("bridge")
         if previous is not None:
             previous.close()
-        # Search results and profile snapshots belong to the previous dataset.
+        # Search results and laboratory snapshots belong to the previous core.
         for key in list(st.session_state):
-            if key.startswith(("search_", "ae_", "sl_", "sp_")) or key in {"last_access", "access_history"}:
+            if key.startswith(("search_", "sl_", "sp_")):
                 del st.session_state[key]
         st.session_state.dataset_signature = signature
         try:

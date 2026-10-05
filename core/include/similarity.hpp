@@ -18,12 +18,12 @@ struct SimilarityResult {
 /// Cheaper than the true distance and monotonic, so it is enough for ranking.
 double squaredEuclidean(const std::vector<double>& a, const std::vector<double>& b);
 
-/// Euclidean distance between two equal-length feature vectors (plan §9).
+/// Euclidean distance between two equal-length feature vectors.
 double euclidean(const std::vector<double>& a, const std::vector<double>& b);
 
 /// Rank `candidates` against `query` by exact distance and return the K
 /// closest, using a bounded max-heap (std::priority_queue) so we never fully
-/// sort the candidate set (plan §14).
+/// sort the candidate set.
 ///
 /// @param tracks       collection of tracks.
 /// @param trackIndex   optional prebuilt ID -> vector index map, avoiding O(N) per query.

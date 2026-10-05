@@ -7,7 +7,7 @@ namespace ame {
 
 /// Builds a 1-D ord* key from a multidimensional acoustic feature vector so
 /// that acoustically similar tracks tend to land in nearby regions of the
-/// Skip List (plan §11).
+/// Skip List.
 ///
 /// Pipeline: normalize -> select principal dimensions -> quantize ->
 /// interleave bits (Morton / Z-order) -> uint64_t.

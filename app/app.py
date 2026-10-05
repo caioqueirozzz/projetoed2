@@ -9,10 +9,13 @@ from services.dataset import PROCESSED_CSV, load_catalog
 st.set_page_config(page_title="Adaptive Music Explorer", page_icon="🎵", layout="wide")
 st.title("🎵 Adaptive Music Explorer")
 st.markdown(
-    "Explore o **FMA Medium** por similaridade acústica. A **Skip List** recupera "
-    "candidatos para a busca e a **Splay Tree** organiza o perfil de acessos. "
-    "Use a barra lateral para navegar entre as páginas."
+    "Explore o **FMA Medium** no **Music Explorer**: encontre músicas semelhantes "
+    "com índices em **Skip List** e ouça as recomendações. "
+    "No **Structures Lab**, experimente operações em **Skip List** e **Splay Tree**, "
+    "visualize suas mudanças e compare os benchmarks."
 )
+st.page_link("pages/1_Music_Explorer.py", label="Music Explorer", icon="🎵")
+st.page_link("pages/2_Structures_Lab.py", label="Structures Lab", icon="🧪")
 bridge = get_bridge()
 if bridge is None:
     st.error(st.session_state.get("bridge_error", "Núcleo C++ indisponível."))

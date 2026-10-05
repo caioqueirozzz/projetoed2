@@ -3,13 +3,15 @@
 #include <algorithm>
 #include <cmath>
 #include <queue>
+#include <stdexcept>
 #include <unordered_map>
 
 namespace ame {
 
 double squaredEuclidean(const std::vector<double>& a, const std::vector<double>& b) {
     double sum = 0.0;
-    const std::size_t n = a.size() < b.size() ? a.size() : b.size();
+    if (a.size() != b.size()) throw std::invalid_argument("Feature dimensions differ");
+    const std::size_t n = a.size();
     for (std::size_t i = 0; i < n; ++i) {
         const double d = a[i] - b[i];
         sum += d * d;
@@ -23,7 +25,7 @@ double euclidean(const std::vector<double>& a, const std::vector<double>& b) {
 
 // ── topK ──────────────────────────────────────────────────────────────────────
 //
-// Rank `candidateIds` against `query` and return the K closest (plan §14).
+// Rank `candidateIds` against `query` and return the K closest.
 //
 // Algorithm (bounded max-heap, O(C log K) where C = |candidateIds|):
 //   1. Reuse the supplied ID index, or build an O(N) local map if absent.

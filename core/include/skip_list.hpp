@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <vector>
+#include <random>
+#include <utility>
 
 namespace ame {
 
@@ -16,7 +18,7 @@ struct SkipNode {
         : key(k), trackId(id), forward(level + 1, nullptr) {}
 };
 
-/// Counters exposed for the benchmarks and the Structures Lab UI (plan §24, §29).
+/// Counters exposed for the benchmarks and the Structures Lab UI.
 struct SkipListMetrics {
     std::uint64_t comparisons = 0;
     std::uint64_t insertions = 0;
@@ -26,14 +28,14 @@ struct SkipListMetrics {
     void reset() { *this = SkipListMetrics{}; }
 };
 
-/// Probabilistic ordered index keyed by AcousticKey (plan §10, §12).
+/// Probabilistic ordered index keyed by AcousticKey.
 ///
 /// Primary role: given a query key, return a window of the `numberOfCandidates`
 /// closest tracks in key-space, which the similarity engine then re-ranks with
 /// the exact Euclidean distance.
 class SkipList {
 public:
-    explicit SkipList(int maxLevel = 16, double probability = 0.5);
+    explicit SkipList(int maxLevel = 16, double probability = 0.5, unsigned seed = 42);
     ~SkipList();
 
     SkipList(const SkipList&) = delete;
@@ -42,6 +44,12 @@ public:
     void insert(std::uint64_t key, int trackId);
     bool remove(std::uint64_t key, int trackId);
     SkipNode* search(std::uint64_t key);
+    bool contains(std::uint64_t key, int trackId);
+    bool update(std::uint64_t oldKey, int trackId, std::uint64_t newKey);
+    std::pair<const SkipNode*, const SkipNode*> neighbors(std::uint64_t key);
+    std::vector<std::vector<std::pair<std::uint64_t, int>>> snapshot(std::size_t limit = 80) const;
+    std::size_t memoryBytes() const;
+    const std::vector<std::pair<int, int>>& lastPath() const { return lastPath_; }
 
     /// Return an ordered window around `key` in expected O(log N + C).
     /// Fill from the other side when a boundary is reached (C = budget).
@@ -66,6 +74,8 @@ private:
     int size_ = 0;
     SkipNode* head_;
     SkipListMetrics metrics_;
+    std::mt19937 rng_;
+    std::vector<std::pair<int, int>> lastPath_; // (level, visited track ID)
 };
 
 }  // namespace ame

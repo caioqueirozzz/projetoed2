@@ -8,9 +8,9 @@ namespace ame {
 
 /// A single music track from the FMA Medium dataset.
 ///
-/// `features` holds the selected acoustic descriptors (see plan §7, ~44 values)
+/// `features` holds the selected acoustic descriptors (44 values in the prepared FMA dataset)
 /// already normalized during preprocessing. `acousticKey` is the linearized
-/// Morton-style index used to order tracks inside the Skip List (see §11).
+/// Morton-style index used to order tracks inside the Skip List.
 struct Track {
     int id = 0;
 

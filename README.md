@@ -1,29 +1,27 @@
 # Adaptive Music Explorer
 
-Busca musical adaptativa sobre o dataset **FMA Medium**, construída em torno de
-duas estruturas de dados protagonistas:
+Busca por similaridade musical sobre o **FMA Medium**, com duas áreas:
 
-- **Skip List** — índice acústico probabilístico que reduz o espaço de busca e
-  recupera candidatos acusticamente próximos.
-- **Splay Tree** — estrutura autoajustável que modela o perfil de reprodução do
-  usuário, aproximando da raiz as músicas acessadas recentemente.
+- **Music Explorer** — funcionalidade contextualizada: selecionar uma música,
+  encontrar as K faixas mais semelhantes e ouvir a referência e as recomendações.
+  Duas **Skip Lists** indexam o catálogo e um heap mantém os melhores resultados.
+- **Structures Lab** — apoio ao estudo e teste de **Skip List** e **Splay Tree**,
+  com operações interativas, visualizações, métricas e benchmarks. As estruturas
+  do laboratório são independentes do catálogo musical.
 
 O núcleo de estruturas é escrito em **C++**; o pré-processamento dos dados e a
-interface (**Streamlit**) são escritos em **Python**. O foco do projeto está nas
-estruturas de dados — a interface e o dataset existem para demonstrá-las.
-
-Veja o plano completo em `docs/plano_implementacao.md`.
+interface (**Streamlit**) são escritos em **Python**. A Splay Tree demonstra
+localidade de acesso no laboratório e nos experimentos.
 
 ## Estrutura do repositório
 
 ```
 core/          Núcleo C++ (Skip List, Splay Tree, similaridade, Acoustic Key)
 preprocessing/ Pipeline Python de preparação do FMA -> tracks_processed.csv
-app/           Aplicação Streamlit (4 páginas)
-benchmark/     Benchmarks C++ (Skip List e Splay Tree) + resultados CSV
-tests/         Testes unitários do núcleo C++
+app/           Aplicação Streamlit (início + Music Explorer + Structures Lab)
+benchmark/     Benchmarks C++ (estruturas e similaridade) + resultados CSV
+tests/         Testes C++, integração Python e interface Streamlit
 data/          raw/ (FMA baixado) e processed/ (dataset gerado)
-docs/          Plano e documentação experimental
 ```
 
 ## Build do núcleo C++
@@ -62,29 +60,37 @@ pip install -r app/requirements.txt
 streamlit run app/app.py
 ```
 
-## Estado atual e validação
+Execute a partir da raiz do repositório para carregar `.streamlit/config.toml`,
+que usa verificação periódica dos arquivos Python. Após alterar dependências ou
+assinaturas de componentes, encerre o servidor anterior com `Ctrl+C` e inicie-o
+novamente. Uma porta ocupada indica que a nova instância não foi iniciada.
 
-As estruturas C++, o pipeline FMA e a ponte Streamlit estão implementados.
-A interface oferece busca no catálogo completo, reprodução da faixa e das
-recomendações e registro explícito de acessos na Splay Tree. A personalização
-do ranking pelo perfil continua opcional e não está implementada.
-
-O dataset não é distribuído neste repositório: é necessário baixá-lo e executar
-a importação. Os testes usam amostras sintéticas no formato oficial FMA;
-qualidade de recomendação e reprodução de todos os áudios devem ser avaliadas
-com os arquivos reais.
+Para conferir as páginas no servidor em execução, incluindo busca, áudio e
+operações do laboratório, use a base importada e os benchmarks já gerados:
 
 ```bash
-python -m unittest discover -s tests -p 'test_dataset.py' -v
-./build/benchmark_similarity  # usa o CSV processado, executado na raiz
+AME_LIVE_URL=http://127.0.0.1:8501 python -m unittest discover -s tests -p test_live_app.py -v
 ```
 
-O benchmark gera Recall@10 e tempos para diferentes janelas, incluindo busca
-exaustiva. Structures Lab exibe os resultados salvos. Para uma demonstração
-sintética separada, use `./build/benchmark_similarity --synthetic`.
+Esse teste executa os scripts pelo protocolo do Streamlit e verifica exceções;
+uma resposta HTTP 200 do servidor, isoladamente, não valida as páginas.
 
-## Equipe
+## Estado atual e validação
 
-Cinco integrantes, com divisão de responsabilidades descrita no plano (§39):
-Skip List / Acoustic Key, Splay Tree, processamento do FMA, Streamlit, e
-benchmarks / integração.
+Music Explorer oferece busca **exata certificada** nas 44 características e janela aproximada experimental, com comparação exaustiva opcional, Recall@K e tempos separados. A certificação usa expansão bilateral em uma Skip List ordenada por distância a pivô e limites da desigualdade triangular. Pode ser mais lenta que a busca exaustiva em consultas pouco seletivas.
+
+Structures Lab permite inserir, buscar, remover, acessar, atualizar chaves e limpar as estruturas conforme suas operações. Mostra níveis reais da Skip List, árvores antes/depois e a sequência completa de rotações da Splay. Os benchmarks comparam desempenho, contagens e localidade de acesso.
+
+```bash
+ctest --test-dir build --output-on-failure
+python benchmark/run_benchmarks.py --repeats 5
+```
+
+Use o Python do ambiente virtual na configuração do CMake para habilitar os testes Python, de interface e benchmarks:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE="$PWD/.venv/bin/python"
+cmake --build build
+```
+
+Os testes combinam amostras sintéticas, invariantes das estruturas e interações via Streamlit AppTest. Os experimentos reais são executados separadamente sobre o FMA local.

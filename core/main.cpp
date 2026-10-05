@@ -1,297 +1,167 @@
-// Adaptive Music Explorer — C++ core bridge (plan §4, §45).
-//
-// Protocol: one text command per stdin line → one JSON object per stdout line.
-//
-// Commands (Python → C++):
-//   load <csv_path>
-//   search <track_id> <num_candidates> <top_k>
-//   access <track_id>
-//   splay_state
-//   skiplist_state
-//   quit
-//
-// Responses (C++ → Python): always one UTF-8 JSON line with a "status" key.
-
-#include <algorithm>
-#include <chrono>
-#include <cstdlib>
-#include <memory>
-#include <iostream>
-#include <sstream>
-#include <string>
-#include <unordered_map>
-#include <vector>
-
+// Line protocol. Mutations in the laboratory never modify the music catalogue.
 #include "dataset.hpp"
-#include "similarity.hpp"
-#include "skip_list.hpp"
+#include "acoustic_search.hpp"
 #include "splay_tree.hpp"
-#include "track.hpp"
+#include <chrono>
+#include <iomanip>
+#include <iostream>
+#include <memory>
+#include <sstream>
+#include <stdexcept>
 
-// ── global state ──────────────────────────────────────────────────────────────
-
-static auto g_skipList = std::make_unique<ame::SkipList>();
-static auto g_profile = std::make_unique<ame::SplayTree>();
-static std::vector<ame::Track>              g_tracks;
-static std::unordered_map<int, std::size_t> g_trackIdx;  // id → index in g_tracks
-
-// ── JSON helpers ──────────────────────────────────────────────────────────────
-
-static std::string jesc(const std::string& s) {
-    std::string r;
-    r.reserve(s.size() + 8);
+static std::unique_ptr<ame::AcousticSearch> catalogue;
+static auto labSkip = std::make_unique<ame::SkipList>();
+static auto labSplay = std::make_unique<ame::SplayTree>();
+using Clock = std::chrono::steady_clock;
+static double ms(Clock::time_point start) { return std::chrono::duration<double, std::milli>(Clock::now()-start).count(); }
+static std::string js(const std::string& s) {
+    std::ostringstream out; out << '"';
     for (unsigned char c : s) {
-        if      (c == '"')  r += "\\\"";
-        else if (c == '\\') r += "\\\\";
-        else if (c == '\n') r += "\\n";
-        else if (c == '\r') r += "\\r";
-        else if (c == '\t') r += "\\t";
-        else if (c < 0x20)  { /* skip control chars */ }
-        else                 r += c;
+        if (c == '"' || c == '\\') out << '\\' << c;
+        else if (c < 32) out << "\\u" << std::hex << std::setw(4) << std::setfill('0') << int(c) << std::dec;
+        else out << c;
     }
-    return r;
+    out << '"'; return out.str();
 }
-
-static std::string js(const std::string& s)  { return "\"" + jesc(s) + "\""; }
-static std::string ji(long long v)            { return std::to_string(v); }
-static std::string jd(double v) {
-    char buf[32]; std::snprintf(buf, sizeof(buf), "%.6g", v); return buf;
+static const char* step(ame::SplayStep s) {
+    switch(s) { case ame::SplayStep::Zig: return "Zig"; case ame::SplayStep::ZigZig: return "ZigZig";
+        case ame::SplayStep::ZigZag: return "ZigZag"; default: return "None"; }
 }
-
-static void send(const std::string& json) {
-    std::cout << json << "\n" << std::flush;
+static std::string steps(const ame::SplayTree& tree) {
+    std::ostringstream out; out << '[';
+    for (std::size_t i=0;i<tree.steps().size();++i) { if(i) out << ','; out << js(step(tree.steps()[i])); }
+    out << ']'; return out.str();
 }
-
-static void sendError(const std::string& msg) {
-    send("{\"status\":\"error\",\"message\":" + js(msg) + "}");
+static std::string splayState(const ame::SplayTree& tree) {
+    std::ostringstream out;
+    out << "\"root_id\":" << (tree.getRoot() ? tree.getRoot()->trackId : -1)
+        << ",\"height\":" << tree.height() << ",\"size\":" << tree.size()
+        << ",\"tree_ascii\":" << js(tree.toAscii());
+    return out.str();
 }
-
-// ── utilities ─────────────────────────────────────────────────────────────────
-
-static std::string limitAscii(const std::string& full, int maxLines = 40) {
-    std::string result;
-    int lines = 0;
-    for (char c : full) {
-        if (c == '\n' && ++lines >= maxLines) {
-            result += "\n... (truncated)";
-            break;
-        }
-        result += c;
-    }
-    return result;
-}
-
-static const char* stepName(ame::SplayStep s) {
-    switch (s) {
-        case ame::SplayStep::Zig:    return "Zig";
-        case ame::SplayStep::ZigZig: return "ZigZig";
-        case ame::SplayStep::ZigZag: return "ZigZag";
-        default:                     return "None";
-    }
-}
-
-static int splayTreeSize(ame::SplayNode* n) {
-    return n ? 1 + splayTreeSize(n->left) + splayTreeSize(n->right) : 0;
-}
-
-using Clock = std::chrono::high_resolution_clock;
-
-static double elapsedMs(Clock::time_point t0) {
-    return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
-}
-
-// Load into temporary state: an invalid CSV must preserve the current index.
-static void handleLoad(const std::string& path) {
-    try {
-        auto tracks = ame::loadTracksCsv(path);
-        auto index = std::make_unique<ame::SkipList>();
-        std::unordered_map<int, std::size_t> trackIdx;
-        for (std::size_t i = 0; i < tracks.size(); ++i) {
-            trackIdx[tracks[i].id] = i;
-            index->insert(tracks[i].acousticKey, tracks[i].id);
-        }
-        g_tracks = std::move(tracks);
-        g_trackIdx = std::move(trackIdx);
-        g_skipList = std::move(index);
-        g_profile = std::make_unique<ame::SplayTree>();
-        send("{\"status\":\"ok\",\"loaded\":" + ji(g_tracks.size()) + "}");
-    } catch (const std::exception& error) {
-        sendError(error.what());
-    }
-}
-
-// ── search command ────────────────────────────────────────────────────────────
-//
-// Format: search <track_id> <num_candidates> <top_k>
-
-static void handleSearch(int queryId, int numCandidates, int topK) {
-    if (g_tracks.empty()) {
-        sendError("Dataset not loaded — call 'load' first."); return;
-    }
-    auto it = g_trackIdx.find(queryId);
-    if (it == g_trackIdx.end()) {
-        sendError("track_id " + std::to_string(queryId) + " not in dataset"); return;
-    }
-
-    if (numCandidates <= 0 || topK <= 0) {
-        sendError("Candidate count and top_k must be positive"); return;
-    }
-    const ame::Track& q = g_tracks[it->second];
-
-    const auto compsBefore = g_skipList->metrics().comparisons;
-    auto t0 = Clock::now();
-    const auto budget = std::min<std::size_t>(numCandidates, g_tracks.size() - 1);
-    auto candidates = g_skipList->nearest(q.acousticKey, static_cast<int>(budget + 1));
-    candidates.erase(std::remove(candidates.begin(), candidates.end(), queryId), candidates.end());
-    if (candidates.size() > budget) candidates.resize(budget);
-    const double slMs  = elapsedMs(t0);
-    const std::uint64_t slComps = g_skipList->metrics().comparisons - compsBefore;
-
-    auto t1 = Clock::now();
-    const auto results = ame::topK(q.features, g_tracks, candidates, topK, &g_trackIdx);
-    const double simMs = elapsedMs(t1);
-
-    std::ostringstream oss;
-    oss << "{\"status\":\"ok\","
-        << "\"results\":[";
-    for (std::size_t i = 0; i < results.size(); ++i) {
-        if (i > 0) oss << ",";
-        oss << "{\"track_id\":" << results[i].trackId
-            << ",\"distance\":"  << jd(results[i].distance) << "}";
-    }
-    oss << "],"
-        << "\"metrics\":{"
-        << "\"total_tracks\":"        << ji(g_tracks.size())   << ","
-        << "\"candidates\":"          << ji(candidates.size())  << ","
-        << "\"skiplist_comparisons\":" << ji(slComps)           << ","
-        << "\"skiplist_ms\":"         << jd(slMs)               << ","
-        << "\"similarity_ms\":"       << jd(simMs)              << ","
-        << "\"total_ms\":"            << jd(slMs + simMs)
-        << "}}";
-    send(oss.str());
-}
-
-// ── access command ────────────────────────────────────────────────────────────
-//
-// Format: access <track_id>
-//
-// Registers a playback event in the Splay Tree (plan §17, §45). Returns
-// per-access metrics and ASCII snapshots before/after splay for §27 views.
-
-static void handleAccess(int trackId) {
-    if (trackId <= 0 || (!g_tracks.empty() && g_trackIdx.count(trackId) == 0)) {
-        sendError("Unknown or invalid track_id"); return;
-    }
-    std::string treeBefore = g_profile->getRoot()
-        ? limitAscii(g_profile->toAscii())
-        : "(empty — first access)";
-
-    const auto mBefore = g_profile->metrics();
-
-    g_profile->access(trackId);
-
-    const auto mAfter = g_profile->metrics();
-    const std::uint64_t accessComps = mAfter.comparisons - mBefore.comparisons;
-    const std::uint64_t accessRots  = mAfter.rotations   - mBefore.rotations;
-
-    const ame::SplayNode* root = g_profile->getRoot();
-    const int playCount = root ? root->playCount : 1;
-    const int rootId    = root ? root->trackId   : trackId;
-    const std::string treeAfter = limitAscii(g_profile->toAscii());
-
-    std::ostringstream oss;
-    oss << "{\"status\":\"ok\","
-        << "\"track_id\":"     << ji(trackId)                       << ","
-        << "\"step\":"         << js(stepName(g_profile->lastStep())) << ","
-        << "\"depth_before\":" << ji(mAfter.lastDepthBefore)        << ","
-        << "\"depth_after\":"  << ji(mAfter.lastDepthAfter)         << ","
-        << "\"play_count\":"   << ji(playCount)                      << ","
-        << "\"rotations\":"    << ji(accessRots)                     << ","
-        << "\"comparisons\":"  << ji(accessComps)                    << ","
-        << "\"root_id\":"      << ji(rootId)                         << ","
-        << "\"height\":"       << ji(g_profile->height())             << ","
-        << "\"tree_before\":"  << js(treeBefore)                     << ","
-        << "\"tree_after\":"   << js(treeAfter)
-        << "}";
-    send(oss.str());
-}
-
-// ── splay_state command ───────────────────────────────────────────────────────
-
-static void handleSplayState() {
-    const ame::SplayNode* root = g_profile->getRoot();
-    const std::string tree = root ? limitAscii(g_profile->toAscii()) : "(empty)";
-
-    std::ostringstream oss;
-    oss << "{\"status\":\"ok\","
-        << "\"root_id\":"    << ji(root ? root->trackId : -1)            << ","
-        << "\"height\":"     << ji(g_profile->height())                    << ","
-        << "\"size\":"       << ji(splayTreeSize(g_profile->getRoot()))    << ","
-        << "\"tree_ascii\":" << js(tree)
-        << "}";
-    send(oss.str());
-}
-
-// ── skiplist_state command ────────────────────────────────────────────────────
-
-static void handleSkipListState() {
-    const auto& m = g_skipList->metrics();
-    std::ostringstream oss;
-    oss << "{\"status\":\"ok\","
-        << "\"size\":"        << ji(g_skipList->size()) << ","
-        << "\"comparisons\":" << ji(m.comparisons)     << ","
-        << "\"insertions\":"  << ji(m.insertions)       << ","
-        << "\"searches\":"    << ji(m.searches)
-        << "}";
-    send(oss.str());
-}
-
-// ── main REPL ─────────────────────────────────────────────────────────────────
-
-int main() {
-    std::ios::sync_with_stdio(false);
-    std::cin.tie(nullptr);
-
-    std::string line;
-    while (std::getline(std::cin, line)) {
-        if (line.empty()) continue;
-
-        std::istringstream iss(line);
-        std::string cmd;
-        iss >> cmd;
-
-        if (cmd == "load") {
-            std::string path;
-            std::getline(iss >> std::ws, path);
-            if (path.empty()) { sendError("load: missing csv_path"); continue; }
-            handleLoad(path);
-
-        } else if (cmd == "search") {
-            int queryId = 0, numCandidates = 500, topK = 10;
-            if (!(iss >> queryId >> numCandidates >> topK)) {
-                sendError("search: usage: search <track_id> <num_candidates> <top_k>");
-                continue;
+static std::string skipState(const ame::SkipList& list, bool full=false) {
+    const auto& m=list.metrics();
+    std::ostringstream out;
+    out << "\"size\":" << list.size() << ",\"comparisons\":" << m.comparisons
+        << ",\"insertions\":" << m.insertions << ",\"removals\":" << m.removals << ",\"searches\":" << m.searches;
+    if(full) {
+        auto levels=list.snapshot(128);
+        out << ",\"levels\":[";
+        for(std::size_t l=0;l<levels.size();++l) {
+            if(l) out << ',';
+            out << '[';
+            for(std::size_t i=0;i<levels[l].size();++i) {
+                if(i) out << ',';
+                out << "{\"key\":" << js(std::to_string(levels[l][i].first)) << ",\"id\":" << levels[l][i].second << '}';
             }
-            handleSearch(queryId, numCandidates, topK);
-
-        } else if (cmd == "access") {
-            int trackId = 0;
-            if (!(iss >> trackId)) { sendError("access: usage: access <track_id>"); continue; }
-            handleAccess(trackId);
-
-        } else if (cmd == "splay_state") {
-            handleSplayState();
-
-        } else if (cmd == "skiplist_state") {
-            handleSkipListState();
-
-        } else if (cmd == "quit") {
-            send("{\"status\":\"ok\"}");
-            std::exit(0);
-
-        } else {
-            sendError("Unknown command: " + cmd);
+            out << ']';
         }
+        out << "],\"path\":[";
+        for(std::size_t i=0;i<list.lastPath().size();++i) {
+            if(i) out << ',';
+            out << '[' << list.lastPath()[i].first << ',' << list.lastPath()[i].second << ']';
+        }
+        out << ']';
     }
-    return 0;
+    return out.str();
+}
+static std::string search(int id, int budget, int k, const std::string& mode, bool evaluate) {
+    if(!catalogue) throw std::runtime_error("Dataset not loaded");
+    if(mode!="exact" && mode!="approx") throw std::invalid_argument("Mode must be exact or approx");
+    const auto r=catalogue->search(id,budget,k,mode=="exact",evaluate);
+    std::ostringstream out; out << std::setprecision(17);
+    out << "{\"status\":\"ok\",\"results\":[";
+    for(std::size_t i=0;i<r.results.size();++i) { if(i) out << ','; out << "{\"track_id\":" << r.results[i].trackId << ",\"distance\":" << r.results[i].distance << '}'; }
+    out << "],\"metrics\":{\"total_tracks\":" << catalogue->tracks().size()
+        << ",\"candidates\":" << r.candidates << ",\"initial_candidates\":" << r.initialCandidates
+        << ",\"skiplist_comparisons\":" << r.comparisons << ",\"skiplist_ms\":" << r.indexMs
+        << ",\"similarity_ms\":" << r.similarityMs << ",\"total_ms\":" << r.totalMs
+        << ",\"pruned\":" << r.pruned << ",\"visited\":" << r.visited << ",\"exact\":" << (r.exact?"true":"false")
+        << ",\"recall\":" << r.recall << ",\"brute_force_ms\":" << r.bruteMs
+        << ",\"acoustic_key\":" << js(std::to_string(catalogue->track(id).acousticKey)) << "}}";
+    return out.str();
+}
+static std::string labSkipCommand(const std::string& op, std::uint64_t key, int id, std::uint64_t newKey) {
+    bool success=true;
+    if(op!="state") labSkip->metrics().reset();
+    auto start=Clock::now();
+    if(op=="reset") labSkip=std::make_unique<ame::SkipList>();
+    else if(op=="insert") {
+        if(id<=0) throw std::invalid_argument("ID must be positive");
+        success=!labSkip->contains(key,id);
+        if(success && labSkip->size()>=128) throw std::invalid_argument("Laboratory limit: 128 nodes");
+        if(success) labSkip->insert(key,id);
+    } else if(op=="search") success=labSkip->contains(key,id);
+    else if(op=="remove") success=labSkip->remove(key,id);
+    else if(op=="update") success=labSkip->update(key,id,newKey);
+    else if(op!="state" && op!="traverse") throw std::invalid_argument("Unknown laboratory operation");
+    const double elapsed=ms(start);
+    return "{\"status\":\"ok\",\"success\":"+std::string(success?"true":"false")+",\"operation_ms\":"+std::to_string(elapsed)+","+skipState(*labSkip,true)+"}";
+}
+static std::string labSplayCommand(const std::string& op, int id) {
+    if(op=="state") return "{\"status\":\"ok\","+splayState(*labSplay)+"}";
+    const auto before=labSplay->toAscii();
+    const int oldRoot=labSplay->getRoot()?labSplay->getRoot()->trackId:-1;
+    labSplay->metrics().reset(); bool success=true; auto start=Clock::now();
+    if(op=="reset") labSplay=std::make_unique<ame::SplayTree>();
+    else if(op=="state") return "{\"status\":\"ok\","+splayState(*labSplay)+"}";
+    else {
+        if(id<=0) throw std::invalid_argument("ID must be positive");
+        if(op=="insert" || op=="access") {
+            auto* existing=labSplay->getRoot();
+            while(existing && existing->trackId!=id) existing=id<existing->trackId?existing->left:existing->right;
+            if(!existing && labSplay->size()>=128) throw std::invalid_argument("Laboratory limit: 128 nodes");
+            if(op=="insert") labSplay->insert(id); else labSplay->access(id);
+        } else if(op=="search") success=labSplay->search(id)!=nullptr;
+        else if(op=="remove") success=labSplay->remove(id);
+        else throw std::invalid_argument("Unknown laboratory operation");
+    }
+    const double elapsed=ms(start); const auto& m=labSplay->metrics();
+    std::ostringstream out;
+    out << "{\"status\":\"ok\",\"success\":" << (success?"true":"false") << ',' << splayState(*labSplay)
+        << ",\"previous_root\":" << oldRoot << ",\"tree_before\":" << js(before)
+        << ",\"steps\":" << steps(*labSplay) << ",\"rotations\":" << m.rotations
+        << ",\"comparisons\":" << m.comparisons << ",\"depth_before\":" << m.lastDepthBefore
+        << ",\"depth_after\":" << m.lastDepthAfter << ",\"operation_ms\":" << elapsed << '}';
+    return out.str();
+}
+int main() {
+    std::ios::sync_with_stdio(false); std::cin.tie(nullptr);
+    std::string line;
+    while(std::getline(std::cin,line)) {
+        std::istringstream in(line); std::string cmd; in>>cmd; if(cmd.empty()) continue;
+        try {
+            std::string response;
+            if(cmd=="load") {
+                std::string path; std::getline(in>>std::ws,path);
+                auto next=std::make_unique<ame::AcousticSearch>(ame::loadTracksCsv(path));
+                catalogue=std::move(next);
+                response="{\"status\":\"ok\",\"loaded\":"+std::to_string(catalogue->tracks().size())+"}";
+            } else if(cmd=="search") {
+                int id,budget,k,evaluate=0; std::string mode="exact";
+                if(!(in>>id>>budget>>k)) throw std::invalid_argument("search: expected ID, candidates, K");
+                if(in>>mode) { if(!(in>>evaluate)) evaluate=0; }
+                response=search(id,budget,k,mode,evaluate!=0);
+            } else if(cmd=="track") {
+                int id; if(!(in>>id)||!catalogue) throw std::invalid_argument("track: dataset and ID required");
+                response="{\"status\":\"ok\",\"acoustic_key\":"+js(std::to_string(catalogue->track(id).acousticKey))+"}";
+            } else if(cmd=="skiplist_state") { ame::SkipList empty; response="{\"status\":\"ok\","+skipState(catalogue?catalogue->morton():empty)+"}"; }
+            else if(cmd=="lab_skip") {
+                std::string op; if(!(in>>op)) throw std::invalid_argument("Missing operation");
+                unsigned long long key=0,newKey=0; int id=0;
+                if(op!="state"&&op!="reset"&&op!="traverse") {
+                    std::string token; if(!(in>>token>>id)||token[0]=='-') throw std::invalid_argument("Invalid key/ID");
+                    std::size_t used=0; key=std::stoull(token,&used); if(used!=token.size()) throw std::invalid_argument("Invalid key");
+                    if(op=="update") { if(!(in>>token)||token[0]=='-') throw std::invalid_argument("Invalid new key"); newKey=std::stoull(token,&used); if(used!=token.size()) throw std::invalid_argument("Invalid new key"); }
+                }
+                response=labSkipCommand(op,key,id,newKey);
+            } else if(cmd=="lab_splay") {
+                std::string op; int id=0; if(!(in>>op)) throw std::invalid_argument("Missing operation");
+                if(op!="state"&&op!="reset"&&!(in>>id)) throw std::invalid_argument("Missing ID");
+                response=labSplayCommand(op,id);
+            } else if(cmd=="quit") { std::cout<<"{\"status\":\"ok\"}\n"<<std::flush; break; }
+            else throw std::invalid_argument("Unknown command: "+cmd);
+            std::cout<<response<<'\n'<<std::flush;
+        } catch(const std::exception& e) { std::cout<<"{\"status\":\"error\",\"message\":"<<js(e.what())<<"}\n"<<std::flush; }
+    }
 }

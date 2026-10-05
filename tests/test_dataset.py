@@ -119,7 +119,7 @@ class DatasetTests(unittest.TestCase):
             load_tracks(self.metadata)
 
     @unittest.skipUnless(CORE.is_file(), "Build ame_core_app first for bridge integration")
-    def test_bridge_load_search_access_and_reject_bad_csv(self):
+    def test_bridge_load_search_laboratory_and_reject_bad_csv(self):
         self.prepare()
         csv = self.output / "tracks_processed.csv"
         bridge = CoreBridge(CORE, csv)
@@ -132,13 +132,13 @@ class DatasetTests(unittest.TestCase):
             self.assertEqual(metrics.candidates, 2)
             self.assertGreater(metrics.skiplist_comparisons, 0)
             self.assertEqual([r.distance for r in results], sorted(r.distance for r in results))
-        self.assertEqual(bridge.register_access(2).root_id, 2)
-        self.assertEqual(bridge.register_access(3).root_id, 3)
-        self.assertEqual(bridge.register_access(2).play_count, 2)
+        self.assertEqual(bridge.lab_splay('access', 2)['root_id'], 2)
+        self.assertEqual(bridge.lab_splay('access', 3)['root_id'], 3)
+        self.assertEqual(bridge.lab_splay('access', 2)['depth_after'], 0)
         with self.assertRaises(RuntimeError):
             bridge.find_similar(2, -1, 10)
         with self.assertRaises(RuntimeError):
-            bridge.register_access(999)
+            bridge.find_similar(999, 500, 10)
         data = pd.read_csv(csv)
         for value in [float("nan"), float("inf"), -0.2, 1.1]:
             bad = data.copy()
@@ -152,10 +152,11 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual(bridge._cmd(f"load {self.output / 'bad input.csv'}")["status"], "error")
         data.drop(columns="mfcc_mean_01").to_csv(self.output / "bad input.csv", index=False)
         self.assertEqual(bridge._cmd(f"load {self.output / 'bad input.csv'}")["status"], "error")
-        # Named columns tolerate reordering; a successful reload clears the profile.
+        # Named columns tolerate reordering; loading the catalogue preserves the independent lab.
         data[data.columns[::-1]].to_csv(self.output / "reordered.csv", index=False)
         self.assertEqual(bridge._cmd(f"load {self.output / 'reordered.csv'}")["loaded"], 3)
-        self.assertEqual(bridge.get_splay_state().size, 0)
+        self.assertEqual(bridge.lab_splay()['size'], 2)
+        self.assertEqual(len(bridge.find_similar(2, 10, 10)[0]), 2)
 
     @unittest.skipUnless((CORE.parent / "benchmark_similarity").is_file(), "Build benchmark first")
     def test_real_csv_benchmark_excludes_self(self):

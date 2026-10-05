@@ -3,14 +3,14 @@
 #include <algorithm>
 #include <deque>
 #include <random>
+#include <stdexcept>
 
 namespace ame {
 
-// One RNG per thread so concurrent benchmarks don't share state.
-static thread_local std::mt19937 rng{std::random_device{}()};
-
-SkipList::SkipList(int maxLevel, double probability)
-    : maxLevel_(maxLevel), probability_(probability) {
+SkipList::SkipList(int maxLevel, double probability, unsigned seed)
+    : maxLevel_(maxLevel), probability_(probability), rng_(seed) {
+    if (maxLevel < 1 || maxLevel > 64 || !(probability > 0 && probability < 1))
+        throw std::invalid_argument("Invalid Skip List parameters");
     head_ = new SkipNode(0, -1, maxLevel_);
 }
 
@@ -26,7 +26,7 @@ SkipList::~SkipList() {
 int SkipList::randomLevel() {
     std::uniform_real_distribution<double> dist(0.0, 1.0);
     int level = 0;
-    while (level < maxLevel_ - 1 && dist(rng) < probability_)
+    while (level < maxLevel_ - 1 && dist(rng_) < probability_)
         ++level;
     return level;
 }
@@ -44,16 +44,18 @@ static inline bool before(const SkipNode* n, std::uint64_t key, int trackId) {
 void SkipList::insert(std::uint64_t key, int trackId) {
     std::vector<SkipNode*> update(maxLevel_ + 1);
     SkipNode* cur = head_;
-
+    lastPath_.clear();
     for (int i = currentLevel_; i >= 0; --i) {
-        while (cur->forward[i] && before(cur->forward[i], key, trackId)) {
+        while (cur->forward[i]) {
             ++metrics_.comparisons;
-            cur = cur->forward[i];
+            if (!before(cur->forward[i], key, trackId)) break;
+            cur = cur->forward[i]; lastPath_.push_back({i, cur->trackId});
         }
-        ++metrics_.comparisons;  // the condition that stopped the inner loop
         update[i] = cur;
     }
 
+    if (cur->forward[0]) ++metrics_.comparisons;
+    if (cur->forward[0] && cur->forward[0]->key == key && cur->forward[0]->trackId == trackId) return;
     const int lvl = randomLevel();
     if (lvl > currentLevel_) {
         for (int i = currentLevel_ + 1; i <= lvl; ++i)
@@ -77,17 +79,18 @@ void SkipList::insert(std::uint64_t key, int trackId) {
 bool SkipList::remove(std::uint64_t key, int trackId) {
     std::vector<SkipNode*> update(maxLevel_ + 1);
     SkipNode* cur = head_;
-
+    lastPath_.clear();
     for (int i = currentLevel_; i >= 0; --i) {
-        while (cur->forward[i] && before(cur->forward[i], key, trackId)) {
+        while (cur->forward[i]) {
             ++metrics_.comparisons;
-            cur = cur->forward[i];
+            if (!before(cur->forward[i], key, trackId)) break;
+            cur = cur->forward[i]; lastPath_.push_back({i, cur->trackId});
         }
-        ++metrics_.comparisons;
         update[i] = cur;
     }
 
     SkipNode* target = cur->forward[0];
+    if (target) ++metrics_.comparisons;
     if (!target || target->key != key || target->trackId != trackId)
         return false;
 
@@ -106,37 +109,59 @@ bool SkipList::remove(std::uint64_t key, int trackId) {
     return true;
 }
 
-SkipNode* SkipList::search(std::uint64_t key) {
-    SkipNode* cur = head_;
-
-    for (int i = currentLevel_; i >= 0; --i) {
-        while (cur->forward[i] && cur->forward[i]->key < key) {
-            ++metrics_.comparisons;
-            cur = cur->forward[i];
-        }
-        ++metrics_.comparisons;
-    }
-
+std::pair<const SkipNode*, const SkipNode*> SkipList::neighbors(std::uint64_t key) {
     ++metrics_.searches;
-    SkipNode* candidate = cur->forward[0];
-    return (candidate && candidate->key == key) ? candidate : nullptr;
+    lastPath_.clear();
+    SkipNode* cur = head_;
+    for (int i = currentLevel_; i >= 0; --i) {
+        while (cur->forward[i]) {
+            ++metrics_.comparisons;
+            if (cur->forward[i]->key >= key) break;
+            cur = cur->forward[i];
+            lastPath_.push_back({i, cur->trackId});
+        }
+    }
+    return {cur == head_ ? nullptr : cur, cur->forward[0]};
+}
+
+SkipNode* SkipList::search(std::uint64_t key) {
+    auto pair = neighbors(key);
+    if (pair.second) ++metrics_.comparisons;
+    return pair.second && pair.second->key == key ? const_cast<SkipNode*>(pair.second) : nullptr;
+}
+
+bool SkipList::contains(std::uint64_t key, int trackId) {
+    ++metrics_.searches;
+    lastPath_.clear();
+    const SkipNode* cur = head_;
+    for (int level = currentLevel_; level >= 0; --level) {
+        while (cur->forward[level]) {
+            ++metrics_.comparisons;
+            if (!before(cur->forward[level], key, trackId)) break;
+            cur = cur->forward[level];
+            lastPath_.push_back({level, cur->trackId});
+        }
+    }
+    const auto* candidate = cur->forward[0];
+    if (candidate) ++metrics_.comparisons;
+    return candidate && candidate->key == key && candidate->trackId == trackId;
+}
+
+bool SkipList::update(std::uint64_t oldKey, int trackId, std::uint64_t newKey) {
+    if (!contains(oldKey, trackId)) return false;
+    if (oldKey == newKey) return true;
+    if (contains(newKey, trackId)) return false;
+    remove(oldKey, trackId);
+    insert(newKey, trackId);
+    return true;
 }
 
 std::vector<int> SkipList::nearest(std::uint64_t key, int numberOfCandidates) {
-    ++metrics_.searches;
+    auto bounds = neighbors(key);
     if (numberOfCandidates <= 0 || size_ == 0) return {};
     const int budget = std::min(numberOfCandidates, size_);
-    SkipNode* pred = head_;
-    for (int i = currentLevel_; i >= 0; --i) {
-        while (pred->forward[i]) {
-            ++metrics_.comparisons;
-            if (pred->forward[i]->key >= key) break;
-            pred = pred->forward[i];
-        }
-    }
-
-    SkipNode* left = pred == head_ ? nullptr : pred;
-    SkipNode* right = pred->forward[0];
+    const SkipNode* left = bounds.first;
+    const SkipNode* right = bounds.second;
     std::deque<int> window;
     while (left && static_cast<int>(window.size()) < budget / 2) {
         window.push_front(left->trackId);
@@ -170,4 +195,16 @@ std::vector<std::vector<std::uint64_t>> SkipList::levels() const {
     return out;
 }
 
+std::vector<std::vector<std::pair<std::uint64_t, int>>> SkipList::snapshot(std::size_t limit) const {
+    std::vector<std::vector<std::pair<std::uint64_t, int>>> result(currentLevel_ + 1);
+    for (int level = 0; level <= currentLevel_; ++level)
+        for (auto* n = head_->forward[level]; n && result[level].size() < limit; n = n->forward[level])
+            result[level].push_back({n->key, n->trackId});
+    return result;
+}
+std::size_t SkipList::memoryBytes() const {
+    std::size_t bytes = sizeof(*this);
+    for (auto* n = head_; n; n = n->forward[0]) bytes += sizeof(SkipNode) + n->forward.capacity() * sizeof(SkipNode*);
+    return bytes + lastPath_.capacity() * sizeof(std::pair<int, int>);
+}
 }  // namespace ame

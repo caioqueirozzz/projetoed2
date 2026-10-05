@@ -1,4 +1,4 @@
-// Unit tests for the Splay Tree (plan §42, §49).
+// Unit tests for the Splay Tree.
 // Lightweight assert-based harness — no external framework required.
 //
 // For Zig / Zig-Zig / Zig-Zag tests the tree state is set up by tracing the
@@ -198,21 +198,21 @@ static void test_remove_root() {
 static void test_play_count() {
     ame::SplayTree tree;
 
-    // First access creates the node; constructor sets playCount=1 (first play).
+    // First access creates the node; constructor sets accessCount=1 (first access).
     tree.access(7);
     check(tree.getRoot()->trackId == 7, "7 at root after first access");
-    check(tree.getRoot()->playCount == 1, "playCount is 1 after first access");
+    check(tree.getRoot()->accessCount == 1, "accessCount is 1 after first access");
 
-    // Each subsequent access increments playCount.
+    // Each subsequent access increments accessCount.
     tree.access(7);
-    check(tree.getRoot()->playCount == 2, "playCount increments to 2");
+    check(tree.getRoot()->accessCount == 2, "accessCount increments to 2");
     tree.access(7);
-    check(tree.getRoot()->playCount == 3, "playCount increments to 3");
+    check(tree.getRoot()->accessCount == 3, "accessCount increments to 3");
 
-    // Access to a different node must not change 7's playCount.
+    // Access to a different node must not change 7's accessCount.
     tree.access(99);
     tree.access(7);
-    check(tree.getRoot()->playCount == 4, "playCount continues incrementing");
+    check(tree.getRoot()->accessCount == 4, "accessCount continues incrementing");
 }
 
 static void test_depth_metrics() {

@@ -1,4 +1,4 @@
-"""Lightweight catalog reader for the Streamlit UI (plan §5, §23).
+"""Lightweight catalog reader for Music Explorer.
 
 Reads ``data/processed/tracks_processed.csv`` (the output of
 ``preprocessing/build_dataset.py``) and exposes track metadata for dropdowns,
@@ -82,12 +82,6 @@ def get_track(track_id: int, catalog: Optional[pd.DataFrame] = None) -> dict:
         "genre":     "Unknown",
         "audio_path": "",
     }
-
-
-def format_label(track_id: int, catalog: Optional[pd.DataFrame] = None) -> str:
-    """Return a human-readable label: 'Title — Artist (#id)'."""
-    info = get_track(track_id, catalog)
-    return f"{info['title']} — {info['artist']} (#{track_id})"
 
 
 def audio_path(track_id: int, catalog: Optional[pd.DataFrame] = None) -> Optional[Path]:

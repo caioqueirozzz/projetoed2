@@ -1,0 +1,4 @@
+[server]
+# Poll Python sources so edits are detected even when filesystem events are lost.
+fileWatcherType = "poll"
+folderWatchBlacklist = ["data", "build", ".venv", "benchmark/results"]

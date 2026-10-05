@@ -104,29 +104,22 @@ streamlit run app/app.py
 
 Se CMake não estiver instalado, instale no ambiente virtual com `python -m pip install cmake`. É necessário um compilador C++17.
 
-Music Explorer permite buscar em todo o catálogo e ouvir a faixa escolhida e as recomendações. Use **Registrar acesso no perfil** para atualizar a Splay Tree. O player nativo do Streamlit não informa ao Python quando o botão de play é pressionado; por isso o registro de acesso é explícito.
+Em todos os seletores de músicas, inclusive nas recomendações, clique no próprio
+campo e digite para filtrar a lista a cada letra, sem pressionar Enter. Você pode
+rolar pelas opções filtradas; ao apagar o texto, todas as opções daquele seletor
+voltam a aparecer. A busca ignora diferenças entre maiúsculas e minúsculas.
 
-## 6. Benchmark com o dataset real
+**Music Explorer** permite buscar em todo o catálogo e ouvir a faixa escolhida e as recomendações. Selecione o modo de busca, a quantidade inicial de candidatos e o Top-K; clique em **Encontrar músicas semelhantes**. O modo exato expande a busca quando necessário para certificar o resultado. A comparação exaustiva opcional mede Recall@K e o tempo da referência.
 
-Na raiz do projeto:
+**Structures Lab** reúne as operações e visualizações de Skip List e Splay Tree em instâncias independentes do catálogo. O laboratório aceita IDs de demonstração e funciona mesmo sem importar o FMA; a busca musical exige a base processada. Os benchmarks de similaridade também exigem a base.
 
-```bash
-./build/benchmark_similarity
-```
+## 6. Benchmarks com o dataset real
 
-O executável usa `data/processed/tracks_processed.csv`, compara candidatos da Skip List com busca exaustiva e salva `benchmark/results/benchmark_recall.csv`. A faixa consultada é excluída de ambas as buscas. A tela Structures Lab exibe a tabela e o Recall@10; o benchmark precisa ser executado novamente após substituir o dataset. Para menos de 11 faixas, o relatório informa o K efetivo na coluna `top_k`.
+Na raiz, execute `python benchmark/run_benchmarks.py --repeats 5`. O script mede a busca aproximada, a busca exata certificada e os comparativos das estruturas, registra a identificação da base e publica os CSVs em `benchmark/results/`. O laboratório exibe resultados, médias, desvios e exportações, e avisa quando os arquivos não correspondem à base/código atual.
 
-Entrada e saída alternativas:
+A faixa consultada é excluída do ranking e da referência exaustiva. Para menos de 11 faixas, `top_k` informa o K efetivo. O campo `mode` separa o método certificado da janela aproximada. Use `--dataset` para uma base externa e `--output` para outro diretório.
 
-```bash
-./build/benchmark_similarity "/caminho/tracks_processed.csv" "/caminho/recall.csv"
-```
-
-Dados sintéticos são uma opção explícita, separada dos resultados FMA:
-
-```bash
-./build/benchmark_similarity --synthetic
-```
+`./build/benchmark_similarity --synthetic` mantém uma demonstração sintética separada. No Music Explorer, a busca exata é o padrão e a janela aproximada está disponível como modo experimental.
 
 ## Validação e origem
 

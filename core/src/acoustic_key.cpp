@@ -1,6 +1,8 @@
 #include "acoustic_key.hpp"
 
-#include <cassert>
+#include <cmath>
+#include <limits>
+#include <stdexcept>
 
 namespace ame {
 
@@ -8,10 +10,8 @@ namespace ame {
 
 AcousticKey::AcousticKey(int dimensions, int bitsPerDim)
     : dimensions_(dimensions), bitsPerDim_(bitsPerDim) {
-    assert(dimensions  > 0 && "dimensions must be positive");
-    assert(bitsPerDim  > 0 && "bitsPerDim must be positive");
-    assert(dimensions * bitsPerDim <= 64 &&
-           "total bits must fit in a uint64_t (dimensions * bitsPerDim <= 64)");
+    if (dimensions <= 0 || bitsPerDim <= 0 || dimensions > 64 || bitsPerDim > 64 || dimensions > 64 / bitsPerDim)
+        throw std::invalid_argument("Acoustic Key dimensions and bits must fit uint64_t");
 }
 
 // ── quantize ──────────────────────────────────────────────────────────────────
@@ -22,13 +22,14 @@ AcousticKey::AcousticKey(int dimensions, int bitsPerDim)
 // Round-to-nearest avoids systematic bias at bucket boundaries.
 
 std::uint64_t AcousticKey::quantize(double normalizedValue) const {
-    const std::uint64_t maxVal = (1ULL << bitsPerDim_) - 1;
+    if (!std::isfinite(normalizedValue)) throw std::invalid_argument("Non-finite acoustic feature");
+    const std::uint64_t maxVal = bitsPerDim_ == 64 ? std::numeric_limits<std::uint64_t>::max() : (1ULL << bitsPerDim_) - 1;
 
     if (normalizedValue <= 0.0) return 0;
     if (normalizedValue >= 1.0) return maxVal;
 
     return static_cast<std::uint64_t>(
-        normalizedValue * static_cast<double>(maxVal) + 0.5);
+        static_cast<long double>(normalizedValue) * maxVal + 0.5L);
 }
 
 // ── interleave ────────────────────────────────────────────────────────────────
