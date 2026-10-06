@@ -44,6 +44,8 @@ public:
     void insert(std::uint64_t key, int trackId);
     bool remove(std::uint64_t key, int trackId);
     SkipNode* search(std::uint64_t key);
+    // Find every ID with this key, in ID order, using the Skip List search path.
+    std::vector<int> searchAll(std::uint64_t key);
     bool contains(std::uint64_t key, int trackId);
     bool update(std::uint64_t oldKey, int trackId, std::uint64_t newKey);
     std::pair<const SkipNode*, const SkipNode*> neighbors(std::uint64_t key);

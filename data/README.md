@@ -113,6 +113,14 @@ voltam a aparecer. A busca ignora diferenças entre maiúsculas e minúsculas.
 
 **Structures Lab** reúne as operações e visualizações de Skip List e Splay Tree em instâncias independentes do catálogo. O laboratório aceita IDs de demonstração e funciona mesmo sem importar o FMA; a busca musical exige a base processada. Os benchmarks de similaridade também exigem a base.
 
+Na **Skip List**, **Buscar** recebe somente a chave e mostra todos os IDs encontrados,
+inclusive quando há chaves repetidas. **Remover** e **Atualizar chave** permitem
+selecionar um nó já cadastrado; somente a atualização pede uma nova chave.
+**Percorrer** mostra a sequência completa de chaves e IDs, e **Limpar** não pede
+parâmetros. Na **Splay Tree**, o ID é a própria chave: **Buscar** não insere nós;
+**Acessar ou inserir** informa se acessou um ID existente ou criou um novo nó.
+Cada operação apresenta apenas os campos necessários e um resultado específico.
+
 ## 6. Benchmarks com o dataset real
 
 Na raiz, execute `python benchmark/run_benchmarks.py --repeats 5`. O script mede a busca aproximada, a busca exata certificada e os comparativos das estruturas, registra a identificação da base e publica os CSVs em `benchmark/results/`. O laboratório exibe resultados, médias, desvios e exportações, e avisa quando os arquivos não correspondem à base/código atual.

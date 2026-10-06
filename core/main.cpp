@@ -83,6 +83,8 @@ static std::string search(int id, int budget, int k, const std::string& mode, bo
 }
 static std::string labSkipCommand(const std::string& op, std::uint64_t key, int id, std::uint64_t newKey) {
     bool success=true;
+    std::string outcome = op;
+    std::vector<int> matches;
     if(op!="state") labSkip->metrics().reset();
     auto start=Clock::now();
     if(op=="reset") labSkip=std::make_unique<ame::SkipList>();
@@ -91,17 +93,41 @@ static std::string labSkipCommand(const std::string& op, std::uint64_t key, int 
         success=!labSkip->contains(key,id);
         if(success && labSkip->size()>=128) throw std::invalid_argument("Laboratory limit: 128 nodes");
         if(success) labSkip->insert(key,id);
-    } else if(op=="search") success=labSkip->contains(key,id);
-    else if(op=="remove") success=labSkip->remove(key,id);
-    else if(op=="update") success=labSkip->update(key,id,newKey);
+        outcome = success ? "inserted" : "duplicate";
+    } else if(op=="search") {
+        matches=labSkip->searchAll(key);
+        success=!matches.empty();
+        outcome=success ? "found" : "not_found";
+    } else if(op=="remove") {
+        success=labSkip->remove(key,id);
+        outcome=success ? "removed" : "not_found";
+    } else if(op=="update") {
+        if(!labSkip->contains(key,id)) { success=false; outcome="not_found"; }
+        else if(key==newKey) outcome="unchanged";
+        else {
+            success=labSkip->update(key,id,newKey);
+            outcome=success ? "updated" : "duplicate";
+        }
+    }
     else if(op!="state" && op!="traverse") throw std::invalid_argument("Unknown laboratory operation");
     const double elapsed=ms(start);
-    return "{\"status\":\"ok\",\"success\":"+std::string(success?"true":"false")+",\"operation_ms\":"+std::to_string(elapsed)+","+skipState(*labSkip,true)+"}";
+    std::ostringstream out;
+    out << "{\"status\":\"ok\",\"success\":" << (success?"true":"false")
+        << ",\"outcome\":" << js(outcome) << ",\"operation\":" << js(op)
+        << ",\"key\":" << js(std::to_string(key)) << ",\"id\":" << id
+        << ",\"new_key\":" << js(std::to_string(newKey)) << ",\"matches\":[";
+    for(std::size_t i=0;i<matches.size();++i) {
+        if(i) out << ',';
+        out << "{\"key\":" << js(std::to_string(key)) << ",\"id\":" << matches[i] << '}';
+    }
+    out << "],\"operation_ms\":" << elapsed << ',' << skipState(*labSkip,true) << '}';
+    return out.str();
 }
 static std::string labSplayCommand(const std::string& op, int id) {
     if(op=="state") return "{\"status\":\"ok\","+splayState(*labSplay)+"}";
     const auto before=labSplay->toAscii();
     const int oldRoot=labSplay->getRoot()?labSplay->getRoot()->trackId:-1;
+    const auto oldSize=labSplay->size();
     labSplay->metrics().reset(); bool success=true; auto start=Clock::now();
     if(op=="reset") labSplay=std::make_unique<ame::SplayTree>();
     else if(op=="state") return "{\"status\":\"ok\","+splayState(*labSplay)+"}";
@@ -117,8 +143,14 @@ static std::string labSplayCommand(const std::string& op, int id) {
         else throw std::invalid_argument("Unknown laboratory operation");
     }
     const double elapsed=ms(start); const auto& m=labSplay->metrics();
+    std::string outcome;
+    if(op=="reset") outcome="reset";
+    else if(op=="insert" || op=="access") outcome=labSplay->size()>oldSize ? "inserted" : "existing";
+    else if(op=="search") outcome=success ? "found" : "not_found";
+    else outcome=success ? "removed" : "not_found";
     std::ostringstream out;
     out << "{\"status\":\"ok\",\"success\":" << (success?"true":"false") << ',' << splayState(*labSplay)
+        << ",\"operation\":" << js(op) << ",\"outcome\":" << js(outcome) << ",\"id\":" << id
         << ",\"previous_root\":" << oldRoot << ",\"tree_before\":" << js(before)
         << ",\"steps\":" << steps(*labSplay) << ",\"rotations\":" << m.rotations
         << ",\"comparisons\":" << m.comparisons << ",\"depth_before\":" << m.lastDepthBefore
@@ -150,8 +182,9 @@ int main() {
                 std::string op; if(!(in>>op)) throw std::invalid_argument("Missing operation");
                 unsigned long long key=0,newKey=0; int id=0;
                 if(op!="state"&&op!="reset"&&op!="traverse") {
-                    std::string token; if(!(in>>token>>id)||token[0]=='-') throw std::invalid_argument("Invalid key/ID");
+                    std::string token; if(!(in>>token)||token[0]=='-') throw std::invalid_argument("Invalid key");
                     std::size_t used=0; key=std::stoull(token,&used); if(used!=token.size()) throw std::invalid_argument("Invalid key");
+                    if(op!="search" && (!(in>>id) || id<=0)) throw std::invalid_argument("Invalid ID");
                     if(op=="update") { if(!(in>>token)||token[0]=='-') throw std::invalid_argument("Invalid new key"); newKey=std::stoull(token,&used); if(used!=token.size()) throw std::invalid_argument("Invalid new key"); }
                 }
                 response=labSkipCommand(op,key,id,newKey);

@@ -130,6 +130,17 @@ SkipNode* SkipList::search(std::uint64_t key) {
     return pair.second && pair.second->key == key ? const_cast<SkipNode*>(pair.second) : nullptr;
 }
 
+std::vector<int> SkipList::searchAll(std::uint64_t key) {
+    const auto bounds = neighbors(key);
+    std::vector<int> ids;
+    for (const auto* node = bounds.second; node; node = node->forward[0]) {
+        ++metrics_.comparisons;
+        if (node->key != key) break;
+        ids.push_back(node->trackId);
+    }
+    return ids;
+}
+
 bool SkipList::contains(std::uint64_t key, int trackId) {
     ++metrics_.searches;
     lastPath_.clear();

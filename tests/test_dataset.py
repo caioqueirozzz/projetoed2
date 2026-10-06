@@ -158,6 +158,35 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual(bridge.lab_splay()['size'], 2)
         self.assertEqual(len(bridge.find_similar(2, 10, 10)[0]), 2)
 
+    @unittest.skipUnless(CORE.is_file(), "Build ame_core_app first")
+    def test_laboratory_key_only_search_and_operation_outcomes(self):
+        bridge = CoreBridge(CORE, self.output / "absent.csv")
+        self.addCleanup(bridge.close)
+        for key, tid in [(60, 9), (60, 6), (70, 6), (0, 1), (2**64 - 1, 2)]:
+            self.assertEqual(bridge.lab_skip('insert', key, tid)['outcome'], 'inserted')
+        result = bridge._cmd('lab_skip search 60')
+        self.assertEqual(result['matches'], [{'key': '60', 'id': 6}, {'key': '60', 'id': 9}])
+        self.assertEqual(result['searches'], 1)
+        self.assertTrue(result['path'])
+        for key, expected in [(0, 1), (2**64 - 1, 2)]:
+            self.assertEqual(bridge.lab_skip('search', key)['matches'], [{'key': str(key), 'id': expected}])
+        self.assertEqual(bridge.lab_skip('search', 61)['outcome'], 'not_found')
+        self.assertEqual(bridge.lab_skip('insert', 60, 6)['outcome'], 'duplicate')
+        self.assertEqual(bridge.lab_skip('update', 60, 6, 70)['outcome'], 'duplicate')
+        self.assertEqual(bridge.lab_skip('update', 60, 6, 60)['outcome'], 'unchanged')
+        self.assertEqual(bridge.lab_skip('update', 60, 6, 80)['outcome'], 'updated')
+        self.assertEqual(bridge.lab_skip('remove', 60, 9)['outcome'], 'removed')
+        self.assertEqual(bridge.lab_skip('remove', 60, 9)['outcome'], 'not_found')
+        self.assertEqual([n['key'] for n in bridge.lab_skip('traverse')['levels'][0]], ['0', '70', '80', str(2**64 - 1)])
+        self.assertEqual(bridge.lab_skip('reset')['size'], 0)
+        self.assertEqual(bridge.lab_splay('search', 5)['outcome'], 'not_found')
+        self.assertEqual(bridge.lab_splay('access', 5)['outcome'], 'inserted')
+        self.assertEqual(bridge.lab_splay('insert', 5)['outcome'], 'existing')
+        self.assertEqual(bridge.lab_splay('search', 5)['outcome'], 'found')
+        self.assertEqual(bridge.lab_splay('remove', 5)['outcome'], 'removed')
+        self.assertEqual(bridge.lab_splay('remove', 5)['outcome'], 'not_found')
+        self.assertEqual(bridge.lab_splay('reset')['size'], 0)
+
     @unittest.skipUnless((CORE.parent / "benchmark_similarity").is_file(), "Build benchmark first")
     def test_real_csv_benchmark_excludes_self(self):
         self.prepare()

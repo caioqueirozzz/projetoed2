@@ -221,7 +221,27 @@ static void test_nearest_boundaries_and_backward_links() {
 
 // ── main ──────────────────────────────────────────────────────────────────────
 
+static void test_search_all_by_key() {
+    ame::SkipList list;
+    check(list.searchAll(60).empty(), "key-only search on empty list");
+    list.insert(50, 8);
+    list.insert(60, 9);
+    list.insert(60, 6);
+    list.insert(70, 3);
+    list.metrics().reset();
+    check(list.searchAll(60) == std::vector<int>({6, 9}), "key-only search returns all matching IDs in order");
+    check(list.metrics().searches == 1, "key-only search uses one Skip List lookup");
+    check(!list.lastPath().empty(), "key-only search records actual traversal");
+    check(list.searchAll(65).empty(), "missing key between existing nodes");
+    check(list.searchAll(0).empty(), "missing key below first node");
+    check(list.searchAll(80).empty(), "missing key above last node");
+    check(list.searchAll(70) == std::vector<int>({3}), "single match at tail");
+    list.remove(60, 6);
+    check(list.searchAll(60) == std::vector<int>({9}), "removing one duplicate preserves the other");
+}
+
 int main() {
+    test_search_all_by_key();
     test_nearest_boundaries_and_backward_links();
     test_empty();
     test_insert_and_search();

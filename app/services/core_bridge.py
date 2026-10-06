@@ -171,14 +171,24 @@ class CoreBridge:
                  new_key: int = 0) -> dict:
         if operation not in {"state", "insert", "remove", "search", "update", "traverse", "reset"}:
             raise ValueError("Unknown operation")
-        response = self._cmd(f"lab_skip {operation} {key} {track_id} {new_key}")
+        command = f"lab_skip {operation}"
+        if operation in {"insert", "remove", "search", "update"}:
+            command += f" {key}"
+        if operation in {"insert", "remove", "update"}:
+            command += f" {track_id}"
+        if operation == "update":
+            command += f" {new_key}"
+        response = self._cmd(command)
         self._check(response)
         return response
 
     def lab_splay(self, operation: str = "state", track_id: int = 1) -> dict:
         if operation not in {"state", "insert", "remove", "search", "access", "reset"}:
             raise ValueError("Unknown operation")
-        response = self._cmd(f"lab_splay {operation} {track_id}")
+        command = f"lab_splay {operation}"
+        if operation not in {"state", "reset"}:
+            command += f" {track_id}"
+        response = self._cmd(command)
         self._check(response)
         return response
 

@@ -19,37 +19,86 @@ if bridge is None:
     st.error(st.session_state.get("bridge_error", "Núcleo indisponível")); st.stop()
 sl_tab, sp_tab, bench_tab = st.tabs(["Skip List", "Splay Tree", "Benchmarks"])
 with sl_tab:
+    # Outside the form so each operation immediately displays only its own inputs.
+    operations = {"Inserir": "insert", "Buscar": "search", "Remover": "remove", "Atualizar chave": "update", "Percorrer": "traverse", "Limpar": "reset"}
+    op = st.selectbox("Operação da Skip List", list(operations), key="sl_operation")
+    state = bridge.lab_skip()
+    nodes = state["levels"][0] if state["levels"] else []
+    node_options = {f"{node['key']}:{node['id']}": node for node in nodes}
+    if st.session_state.get("sl_target") not in node_options:
+        st.session_state.pop("sl_target", None)
+    if op == "Buscar":
+        st.caption("Informe a chave para encontrar todos os nós com esse valor. Os IDs aparecem no resultado.")
+    elif op in {"Remover", "Atualizar chave"}:
+        st.caption("Escolha o nó cadastrado. O ID distingue nós que têm a mesma chave.")
+        if not nodes:
+            st.info("A Skip List está vazia. Insira um nó primeiro.")
     with st.form("sl_form"):
-        op = st.selectbox("Operação da Skip List", ["Inserir", "Buscar", "Remover", "Atualizar chave", "Percorrer", "Limpar"])
-        key = st.text_input("Chave inteira sem sinal", "10")
-        tid = st.number_input("ID do nó", 1, 2147483647, 1)
-        new_key = st.text_input("Nova chave (atualização)", "20")
-        submit = st.form_submit_button("Executar operação na Skip List")
+        key, tid, new_key = "0", 0, "0"
+        if op in {"Inserir", "Buscar"}:
+            key = st.text_input("Chave inteira sem sinal", "10", key="sl_key")
+        if op == "Inserir":
+            tid = st.number_input("ID do nó", 1, 2147483647, 1, key="sl_id")
+        if op in {"Remover", "Atualizar chave"}:
+            target = st.selectbox("Nó a remover" if op == "Remover" else "Nó a atualizar", list(node_options),
+                                 format_func=lambda value: f"Chave {node_options[value]['key']} — ID {node_options[value]['id']}",
+                                 key="sl_target", disabled=not nodes)
+            if target is not None:
+                key, tid = node_options[target]["key"], node_options[target]["id"]
+        if op == "Atualizar chave":
+            new_key = st.text_input("Nova chave (atualização)", "20", key="sl_new_key")
+        submit = st.form_submit_button("Executar operação na Skip List", disabled=op in {"Remover", "Atualizar chave"} and not nodes)
     if submit:
         try:
-            k = int(key) if op not in {"Percorrer", "Limpar"} else 0
-            nk = int(new_key) if op == "Atualizar chave" else 0
+            try:
+                k, nk = int(key), int(new_key)
+            except ValueError:
+                raise ValueError("Digite uma chave inteira válida.") from None
             if not (0 <= k < 2**64 and 0 <= nk < 2**64):
                 raise ValueError("As chaves devem estar entre 0 e 2⁶⁴−1.")
-            operations = {"Inserir": "insert", "Buscar": "search", "Remover": "remove", "Atualizar chave": "update", "Percorrer": "traverse", "Limpar": "reset"}
-            result = bridge.lab_skip(operations[op], k, int(tid), nk)
-            st.session_state.sl_lab_result = result
-            if result["success"]:
-                st.success(f"{op}: operação concluída.")
-            else:
-                st.warning("Operação sem alteração: elemento ausente, duplicado ou destino já existente.")
+            st.session_state.sl_lab_result = bridge.lab_skip(operations[op], k, int(tid), nk)
+            st.rerun()
         except (ValueError, RuntimeError) as exc:
+            st.session_state.pop("sl_lab_result", None)
             st.error(str(exc))
-    state = bridge.lab_skip()
+    result = st.session_state.get("sl_lab_result")
+    if result:
+        action, outcome = result["operation"], result["outcome"]
+        st.caption(f"Última operação executada: {next(label for label, code in operations.items() if code == action)}")
+        if action == "search":
+            if result["matches"]:
+                st.success(f"Chave {result['key']}: {len(result['matches'])} nó(s) encontrado(s).")
+                st.dataframe([{"Chave": node["key"], "ID": node["id"]} for node in result["matches"]], hide_index=True, width="stretch")
+            else:
+                st.info(f"Nenhum nó encontrado com a chave {result['key']}.")
+        elif action == "traverse":
+            ordered = result["levels"][0] if result["levels"] else []
+            if ordered:
+                st.success(f"Percurso completo: {len(ordered)} nó(s), em ordem de chave e ID.")
+                st.dataframe([{"Chave": node["key"], "ID": node["id"]} for node in ordered], hide_index=True, width="stretch")
+            else:
+                st.info("A Skip List está vazia; não há nós para percorrer.")
+        elif action == "reset":
+            st.success("Skip List limpa: nenhum nó armazenado.")
+        elif outcome == "duplicate":
+            duplicate_key = result["new_key"] if action == "update" else result["key"]
+            st.warning(f"O nó com chave {duplicate_key} e ID {result['id']} já existe. Nenhum nó foi alterado.")
+        elif outcome == "not_found":
+            st.warning(f"Nó com chave {result['key']} e ID {result['id']} não encontrado.")
+        elif outcome == "unchanged":
+            st.info(f"O nó de ID {result['id']} já tem a chave {result['key']}. Nenhuma alteração necessária.")
+        elif action == "update":
+            st.success(f"Nó de ID {result['id']}: chave alterada de {result['key']} para {result['new_key']}.")
+        else:
+            st.success(f"Nó com chave {result['key']} e ID {result['id']} {'inserido' if action == 'insert' else 'removido'}.")
     a, b, c = st.columns(3)
     a.metric("Nós na Skip List do laboratório", state["size"])
     b.metric("Níveis reais", len(state["levels"]) if state["size"] else 0)
     c.metric("Comparações da última operação", state["comparisons"])
-    result = st.session_state.get("sl_lab_result")
     if result:
         st.caption(f"Tempo da última operação: {result['operation_ms']:.4f} ms. Comparações contam testes de ordenação/chave; avanços e memória não são comparações.")
-        if result["path"]:
-            st.write("Percurso da última busca (nível, ID):", result["path"])
+        if result["path"] and result["operation"] != "traverse":
+            st.write("Avanços da última operação (nível, ID):", result["path"])
     st.subheader("Níveis e ligações reais")
     lines = []
     for level in reversed(range(len(state["levels"]))):
@@ -58,22 +107,39 @@ with sl_tab:
     st.code("\n".join(lines), language=None)
     st.caption("O nível 0 é o percurso completo em ordem (chave, ID). A mesma semente reproduz os níveis para a mesma sequência de operações.")
 with sp_tab:
+    operations = {"Inserir": "insert", "Buscar": "search", "Remover": "remove", "Acessar ou inserir": "access", "Limpar": "reset"}
+    op = st.selectbox("Operação da Splay Tree", list(operations), key="sp_operation")
+    st.caption("Nesta árvore, o ID é a própria chave de busca.")
+    if op == "Acessar ou inserir":
+        st.caption("Acessa o ID e o move para a raiz. Se ele não existir, insere um novo nó.")
     with st.form("sp_form"):
-        op = st.selectbox("Operação da Splay Tree", ["Inserir", "Buscar", "Remover", "Acessar", "Limpar"])
-        tid = st.number_input("ID na Splay", 1, 2147483647, 1)
+        tid = st.number_input("ID na Splay", 1, 2147483647, 1, key="sp_id") if op != "Limpar" else 0
         submit = st.form_submit_button("Executar operação na Splay")
     if submit:
         try:
-            operations = {"Inserir": "insert", "Buscar": "search", "Remover": "remove", "Acessar": "access", "Limpar": "reset"}
-            result = bridge.lab_splay(operations[op], int(tid))
-            st.session_state.sp_lab_result = result
-            if result["success"]:
-                st.success(f"{op}: operação concluída.")
-            else:
-                st.info("ID não encontrado. O último nó visitado foi afunilado.")
-        except RuntimeError as exc:
+            st.session_state.sp_lab_result = bridge.lab_splay(operations[op], int(tid))
+            st.rerun()
+        except (ValueError, RuntimeError) as exc:
+            st.session_state.pop("sp_lab_result", None)
             st.error(str(exc))
     state = bridge.lab_splay()
+    result = st.session_state.get("sp_lab_result")
+    if result:
+        outcome, action = result["outcome"], result["operation"]
+        st.caption(f"Última operação executada: {next(label for label, code in operations.items() if code == action)}")
+        if outcome == "reset":
+            st.success("Splay Tree limpa: nenhum nó armazenado.")
+        elif outcome == "not_found":
+            detail = "A árvore está vazia." if state["root_id"] < 0 else f"O último nó visitado, ID {state['root_id']}, foi movido para a raiz."
+            st.info(f"ID {result['id']} não encontrado. {detail}")
+        elif outcome == "removed":
+            st.success(f"Nó de ID {result['id']} removido.")
+        elif outcome == "inserted":
+            st.success(f"ID {result['id']} inserido e posicionado na raiz.")
+        elif outcome == "existing" and action == "insert":
+            st.info(f"ID {result['id']} já existe. O nó foi movido para a raiz, sem criar uma cópia.")
+        else:
+            st.success(f"ID {result['id']} {'encontrado' if action == 'search' else 'acessado'} e posicionado na raiz.")
     a, b, c = st.columns(3)
     a.metric("Raiz atual do laboratório", state["root_id"] if state["root_id"] >= 0 else "—")
     b.metric("Altura", state["height"])

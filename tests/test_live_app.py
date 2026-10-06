@@ -85,13 +85,19 @@ class LiveApplicationTests(unittest.IsolatedAsyncioTestCase):
                         self.fail(f'{self.page}: {element.exception.type}: {element.exception.message}')
                     self.elements.append(element)
                 if kind == 'script_finished':
+                    if msg.script_finished == ForwardMsg.FINISHED_EARLY_FOR_RERUN:
+                        self.elements = []
+                        continue
                     break
+        previous_widgets = self.widgets
+        self.widgets = {}
         for element in self.elements:
             kind = element.WhichOneof('type')
             if kind not in {'selectbox', 'radio', 'text_input', 'checkbox', 'slider', 'number_input', 'button'}:
                 continue
             proto = getattr(element, kind)
-            if proto.id in self.widgets:
+            if proto.id in previous_widgets:
+                self.widgets[proto.id] = previous_widgets[proto.id]
                 if kind == 'button':
                     self.widgets[proto.id].trigger_value = False
                 continue
@@ -145,14 +151,20 @@ class LiveApplicationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_laboratory_operations_and_benchmark_tables(self):
         await self.run_page('Structures_Lab')
-        self.set_value('text_input', 'Nova chave (atualização)', 'unused')
         await self.click('Executar operação na Skip List')
         self.assertEqual(self.metric('Nós na Skip List do laboratório'), '1')
+        self.set_value('selectbox', 'Operação da Skip List', 'Buscar')
+        await self.run_page()
+        self.assertFalse(any(e.HasField('number_input') and e.number_input.label == 'ID do nó' for e in self.elements))
+        self.set_value('text_input', 'Chave inteira sem sinal', '10')
+        await self.click('Executar operação na Skip List')
+        self.assertTrue(any(e.HasField('alert') and '1 nó(s) encontrado(s)' in e.alert.body for e in self.elements))
         self.set_value('selectbox', 'Operação da Skip List', 'Atualizar chave')
+        await self.run_page()
         self.set_value('text_input', 'Nova chave (atualização)', '20')
         await self.click('Executar operação na Skip List')
         self.set_value('selectbox', 'Operação da Skip List', 'Remover')
-        self.set_value('text_input', 'Chave inteira sem sinal', '20')
+        await self.run_page()
         await self.click('Executar operação na Skip List')
         self.assertEqual(self.metric('Nós na Skip List do laboratório'), '0')
         for node in range(1, 5):
@@ -160,10 +172,13 @@ class LiveApplicationTests(unittest.IsolatedAsyncioTestCase):
             await self.click('Executar operação na Splay')
             self.assertEqual(self.metric('Raiz atual do laboratório'), str(node))
         self.set_value('selectbox', 'Operação da Splay Tree', 'Buscar')
+        await self.run_page()
         self.set_value('number_input', 'ID na Splay', 1)
         await self.click('Executar operação na Splay')
         self.assertEqual(self.metric('Rotações'), '3')
         self.set_value('selectbox', 'Operação da Splay Tree', 'Limpar')
+        await self.run_page()
+        self.assertFalse(any(e.HasField('number_input') and e.number_input.label == 'ID na Splay' for e in self.elements))
         await self.click('Executar operação na Splay')
         self.assertEqual(self.metric('Nós na Splay do laboratório'), '0')
         self.assertEqual(sum(e.HasField('download_button') for e in self.elements), 4)
