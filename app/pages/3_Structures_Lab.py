@@ -12,6 +12,8 @@ from services.benchmarks import provenance_warnings, read_benchmark
 
 ROOT = Path(__file__).resolve().parents[2]
 st.set_page_config(page_title="Structures Lab — AME", layout="wide")
+st.session_state.pop("history_view", None)
+st.session_state.pop("history_expanded", None)
 st.title("Laboratório de Estruturas")
 st.caption("Experimente Skip List e Splay Tree em estruturas independentes do catálogo musical. Limite de 128 nós por laboratório; desenho da Splay limitado a 40 nós.")
 bridge = get_bridge()

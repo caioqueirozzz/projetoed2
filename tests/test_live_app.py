@@ -6,6 +6,7 @@ protocol and fail on exceptions, including stale imported Python components.
 """
 from __future__ import annotations
 import asyncio
+import json
 import os
 import unittest
 from urllib.parse import urljoin
@@ -27,6 +28,7 @@ class LiveApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(self.close_socket)
         self.widgets = {}
         self.elements = []
+        self.pages = []
         self.page = ''
 
     async def close_socket(self):
@@ -77,6 +79,8 @@ class LiveApplicationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNotNone(raw, 'Server disconnected before finishing the page')
                 msg = ForwardMsg.FromString(raw)
                 kind = msg.WhichOneof('type')
+                if kind == 'navigation':
+                    self.pages = list(msg.navigation.app_pages)
                 if kind == 'page_not_found':
                     self.fail(f'Page not found: {self.page}')
                 if kind == 'delta' and msg.delta.HasField('new_element'):
@@ -93,6 +97,10 @@ class LiveApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.widgets = {}
         for element in self.elements:
             kind = element.WhichOneof('type')
+            if kind == 'bidi_component':
+                self.widgets[element.bidi_component.id] = WidgetState(
+                    id=element.bidi_component.id, json_value='{}')
+                continue
             if kind not in {'selectbox', 'radio', 'text_input', 'checkbox', 'slider', 'number_input', 'button'}:
                 continue
             proto = getattr(element, kind)
@@ -121,17 +129,19 @@ class LiveApplicationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_music_search_modes_recommendations_and_served_audio(self):
         await self.run_page('')
-        self.assertGreater(int(self.metric('Faixas no índice')), 1)
-        links = [e.page_link.label for e in self.elements if e.HasField('page_link')]
-        self.assertEqual(set(links), {'Music Explorer', 'Structures Lab'})
-        await self.run_page('Music_Explorer')
+        self.assertEqual([page.page_name for page in self.pages],
+                         ['Music Explorer', 'Playback Profile', 'Structures Lab'])
+        self.assertTrue(self.pages[0].is_default)
+        self.assertEqual(self.pages[0].url_pathname, '')
+        self.assertTrue(any(e.HasField('heading') and e.heading.body == 'Music Explorer' for e in self.elements))
         self.assertEqual(sum(e.HasField('audio') for e in self.elements), 1)
         self.set_value('checkbox', 'Comparar com busca exaustiva (Recall@K)', True)
         await self.click('Encontrar músicas semelhantes')
         k = min(10, int(self.metric('Faixas no índice')) - 1)
         self.assertEqual(self.metric(f'Recall@{k} medido'), '100.0%')
-        self.assertEqual(len(self.element('selectbox', 'Ouvir uma recomendação').options), k)
-        self.assertEqual(sum(e.HasField('audio') for e in self.elements), 2)
+        self.assertEqual(sum(e.HasField('audio') for e in self.elements), k + 1)
+        self.assertFalse(any(e.HasField('dataframe') for e in self.elements))
+        self.assertEqual(sum(e.HasField('markdown') and 'Distância:' in e.markdown.body for e in self.elements), k)
         for element in self.elements:
             if element.HasField('audio'):
                 response = await AsyncHTTPClient().fetch(HTTPRequest(
@@ -142,12 +152,52 @@ class LiveApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.set_value('slider', 'Top-K resultados', 1)
         self.set_value('radio', 'Modo de busca', 'Aproximada experimental')
         await self.click('Encontrar músicas semelhantes')
-        self.assertEqual(len(self.element('selectbox', 'Ouvir uma recomendação').options), 1)
+        self.assertEqual(sum(e.HasField('audio') for e in self.elements), 2)
         choices = self.element('selectbox', 'Selecione uma faixa').options
         self.set_value('selectbox', 'Selecione uma faixa', choices[1])
         self.set_value('radio', 'Modo de busca', 'Exata certificada')
         await self.click('Encontrar músicas semelhantes')
         self.assertEqual(self.metric('Recall@1 medido'), '100.0%')
+
+    async def test_playback_events_update_the_session_profile(self):
+        await self.run_page('Playback_Profile')
+        self.assertTrue(any(e.HasField('alert') and 'histórico está vazio' in e.alert.body
+                            for e in self.elements))
+        await self.run_page('')
+        component = next(e.bidi_component for e in self.elements if e.HasField('bidi_component'))
+        track_id = json.loads(component.json)['track_id']
+        trigger_id = f'$$STREAMLIT_INTERNAL_KEY_{component.id}__events'
+        self.widgets[trigger_id] = WidgetState(
+            id=trigger_id,
+            json_trigger_value=json.dumps([{'event': 'started', 'value': {
+                'track_id': track_id, 'token': 'live-player', 'sequence': 1}}]))
+        await self.run_page()
+        await self.run_page('Playback_Profile')
+        self.assertEqual(self.metric('Músicas no histórico'), '1')
+        self.assertEqual(self.metric('Reproduções na sessão'), '1')
+        self.assertEqual(sum(e.HasField('audio') for e in self.elements), 1)
+        self.assertFalse(any(e.HasField('dataframe') for e in self.elements))
+        selector = self.element('selectbox', 'Buscar no histórico por título, artista ou ID')
+        self.assertEqual(len(selector.options), 1)
+        self.set_value('selectbox', selector.label, selector.options[0])
+        await self.run_page()
+        self.assertEqual(self.metric('Reproduções na sessão'), '1')
+        self.assertEqual(sum(e.HasField('audio') for e in self.elements), 1)
+        component = next(e.bidi_component for e in self.elements if e.HasField('bidi_component'))
+        trigger_id = f'$$STREAMLIT_INTERNAL_KEY_{component.id}__events'
+        self.widgets[trigger_id] = WidgetState(
+            id=trigger_id,
+            json_trigger_value=json.dumps([{'event': 'started', 'value': {
+                'track_id': track_id, 'token': 'live-history', 'sequence': 1}}]))
+        await self.run_page()
+        self.assertEqual(self.metric('Reproduções na sessão'), '1')
+        await self.run_page()
+        self.assertEqual(self.metric('Reproduções na sessão'), '1')
+        await self.click('Atualizar')
+        self.assertEqual(self.metric('Reproduções na sessão'), '2')
+        await self.run_page('')
+        await self.run_page('Playback_Profile')
+        self.assertEqual(self.metric('Reproduções na sessão'), '2')
 
     async def test_laboratory_operations_and_benchmark_tables(self):
         await self.run_page('Structures_Lab')

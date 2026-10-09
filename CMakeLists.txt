@@ -15,6 +15,7 @@ add_compile_options(-Wall -Wextra -Wpedantic)
 add_library(ame_core
     core/src/skip_list.cpp
     core/src/splay_tree.cpp
+    core/src/playback_history.cpp
     core/src/acoustic_key.cpp
     core/src/similarity.cpp
     core/src/dataset.cpp
@@ -28,11 +29,23 @@ target_link_libraries(ame_core_app PRIVATE ame_core)
 
 # ---- Tests -------------------------------------------------------------------
 enable_testing()
-foreach(test_name test_skiplist test_splay test_similarity test_acoustic_key test_regressions)
+foreach(test_name test_skiplist test_splay test_playback_history test_similarity test_acoustic_key test_regressions)
     add_executable(${test_name} tests/${test_name}.cpp)
     target_link_libraries(${test_name} PRIVATE ame_core)
     add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()
+
+# Optional JavaScript tests for native player event capture (Node.js 20+).
+find_program(NODE_EXECUTABLE node)
+if(NODE_EXECUTABLE)
+    execute_process(COMMAND "${NODE_EXECUTABLE}" --version
+                    OUTPUT_VARIABLE NODE_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE)
+    string(REGEX REPLACE "^v" "" NODE_VERSION "${NODE_VERSION}")
+    if(NODE_VERSION VERSION_GREATER_EQUAL "20")
+        add_test(NAME test_playback_events COMMAND "${NODE_EXECUTABLE}" --test
+                 "${CMAKE_SOURCE_DIR}/tests/test_playback_events.mjs")
+    endif()
+endif()
 
 # ---- Benchmarks --------------------------------------------------------------
 foreach(bench_name benchmark_skiplist benchmark_splay benchmark_similarity)

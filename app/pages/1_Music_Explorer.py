@@ -2,14 +2,16 @@
 from __future__ import annotations
 import sys
 from pathlib import Path
-import pandas as pd
 import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from components.music import track_selector, render_player
+from components.track_card import render_track_card, render_track_card_styles
 from services.core_bridge import get_bridge
-from services.dataset import get_track, load_catalog
+from services.dataset import load_catalog
 
 st.set_page_config(page_title="Music Explorer — AME", layout="wide")
+st.session_state.pop("history_view", None)
+st.session_state.pop("history_expanded", None)
 st.title("Music Explorer")
 bridge = get_bridge()
 if bridge is None:
@@ -19,7 +21,9 @@ if not bridge.is_loaded:
 catalog = load_catalog()
 track_id, track_label = track_selector(catalog, "music_track")
 st.subheader(track_label)
-render_player(track_id, catalog)
+render_player(track_id, catalog, key="reference")
+st.caption("Cada início de áudio entra no histórico desta sessão, sem tempo mínimo de reprodução.")
+st.page_link("pages/2_Playback_Profile.py", label="Abrir perfil de reprodução", icon="🕘")
 st.caption(f"Acoustic Key (Morton): {bridge.track_key(track_id)}")
 mode = st.radio("Modo de busca", ["Exata certificada", "Aproximada experimental"], horizontal=True)
 exact = mode == "Exata certificada"
@@ -58,15 +62,11 @@ elif snapshot:
         a.metric(f"Recall@{min(top_k, len(catalog)-1)} medido", f"{metrics.recall:.1%}")
         b.metric("Busca exaustiva (ms)", f"{metrics.brute_force_ms:.3f}")
     st.caption("Tempos excluem interface, comunicação e a comparação exaustiva opcional. Comparações de chave e distâncias são contagens diferentes.")
-    rows = []
+    render_track_card_styles()
     for position, result in enumerate(results, 1):
-        info = get_track(result.track_id, catalog)
-        rows.append({"Posição": position, "Título": info["title"], "Artista": info["artist"], "Gênero": info["genre"], "Distância": result.distance})
-    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
-    if results:
-        selected, _ = track_selector(catalog.loc[[r.track_id for r in results]], "recommendation_track", "Ouvir uma recomendação")
-        render_player(selected, catalog)
-    else:
+        render_track_card(result.track_id, catalog, key="recommendation",
+                          position=position, detail=f"Distância: {result.distance:.6f}")
+    if not results:
         st.info("Nenhuma outra faixa disponível.")
 with st.expander("Como a busca certifica o resultado"):
     st.markdown("A janela Morton fornece os primeiros candidatos. Uma segunda Skip List ordena distâncias a uma faixa pivô. "

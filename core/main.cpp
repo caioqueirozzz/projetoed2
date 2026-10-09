@@ -2,6 +2,7 @@
 #include "dataset.hpp"
 #include "acoustic_search.hpp"
 #include "splay_tree.hpp"
+#include "playback_history.hpp"
 #include <chrono>
 #include <iomanip>
 #include <iostream>
@@ -12,6 +13,7 @@
 static std::unique_ptr<ame::AcousticSearch> catalogue;
 static auto labSkip = std::make_unique<ame::SkipList>();
 static auto labSplay = std::make_unique<ame::SplayTree>();
+static auto history = std::make_unique<ame::PlaybackHistory>();
 using Clock = std::chrono::steady_clock;
 static double ms(Clock::time_point start) { return std::chrono::duration<double, std::milli>(Clock::now()-start).count(); }
 static std::string js(const std::string& s) {
@@ -157,6 +159,49 @@ static std::string labSplayCommand(const std::string& op, int id) {
         << ",\"depth_after\":" << m.lastDepthAfter << ",\"operation_ms\":" << elapsed << '}';
     return out.str();
 }
+static std::string playbackEntry(const ame::PlaybackEntry& entry) {
+    return "{\"track_id\":" + std::to_string(entry.trackId)
+        + ",\"play_count\":" + std::to_string(entry.playCount)
+        + ",\"last_play_order\":" + std::to_string(entry.lastPlayOrder) + "}";
+}
+
+static std::string historyCommand(const std::string& op, int id) {
+    if (op != "state" && op != "play" && op != "search")
+        throw std::invalid_argument("Unknown history operation");
+    std::string entry = "null";
+    bool found = false;
+    if (op == "play") {
+        if (!catalogue) throw std::runtime_error("Dataset not loaded");
+        catalogue->track(id);  // Validate before mutating the session history.
+        entry = playbackEntry(history->play(id));
+        found = true;
+    } else if (op == "search") {
+        const auto* node = history->search(id);
+        found = node != nullptr;
+        if (node) entry = playbackEntry({node->trackId, node->accessCount, node->lastPlayOrder});
+    }
+    const auto& tree = history->tree();
+    const auto& metrics = tree.metrics();
+    std::ostringstream out;
+    out << "{\"status\":\"ok\",\"operation\":" << js(op)
+        << ",\"found\":" << (found ? "true" : "false") << ",\"entry\":" << entry
+        << ",\"total_plays\":" << history->totalPlays() << ',' << splayState(tree)
+        << ",\"comparisons\":" << metrics.comparisons << ",\"rotations\":" << metrics.rotations
+        << ",\"depth_before\":" << metrics.lastDepthBefore << ",\"steps\":" << steps(tree);
+    // The full listing is only needed when opening/refreshing the history.
+    if (op == "state") {
+        out << ",\"entries\":[";
+        const auto entries = history->recent();
+        for (std::size_t i = 0; i < entries.size(); ++i) {
+            if (i) out << ',';
+            out << playbackEntry(entries[i]);
+        }
+        out << ']';
+    }
+    out << '}';
+    return out.str();
+}
+
 int main() {
     std::ios::sync_with_stdio(false); std::cin.tie(nullptr);
     std::string line;
@@ -168,6 +213,7 @@ int main() {
                 std::string path; std::getline(in>>std::ws,path);
                 auto next=std::make_unique<ame::AcousticSearch>(ame::loadTracksCsv(path));
                 catalogue=std::move(next);
+                history=std::make_unique<ame::PlaybackHistory>();
                 response="{\"status\":\"ok\",\"loaded\":"+std::to_string(catalogue->tracks().size())+"}";
             } else if(cmd=="search") {
                 int id,budget,k,evaluate=0; std::string mode="exact";
@@ -192,6 +238,13 @@ int main() {
                 std::string op; int id=0; if(!(in>>op)) throw std::invalid_argument("Missing operation");
                 if(op!="state"&&op!="reset"&&!(in>>id)) throw std::invalid_argument("Missing ID");
                 response=labSplayCommand(op,id);
+            } else if(cmd=="history") {
+                std::string op, extra; int id=0;
+                if (!(in >> op)) throw std::invalid_argument("Missing history operation");
+                if (op != "state" && (!(in >> id) || id <= 0))
+                    throw std::invalid_argument("History requires a positive track ID");
+                if (in >> extra) throw std::invalid_argument("Unexpected history argument");
+                response=historyCommand(op,id);
             } else if(cmd=="quit") { std::cout<<"{\"status\":\"ok\"}\n"<<std::flush; break; }
             else throw std::invalid_argument("Unknown command: "+cmd);
             std::cout<<response<<'\n'<<std::flush;

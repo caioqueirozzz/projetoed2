@@ -2,12 +2,14 @@
 from __future__ import annotations
 import contextlib
 import io
+import json
 import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+import pandas as pd
 from streamlit.testing.v1 import AppTest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'app'), str(ROOT / 'preprocessing')]
@@ -44,9 +46,32 @@ class UIRegressionTests(unittest.TestCase):
                 at.session_state['bridge'].close()
         for p in reversed(self.patches): p.stop()
     def page(self, name):
-        at = AppTest.from_file(str(ROOT / 'app' / name), default_timeout=30).run()
+        # AppTest owns a distinct component registry per runtime. Reimport the
+        # module so its v2 component is registered in this application's runtime.
+        sys.modules.pop('components.music', None)
+        sys.modules.pop('components.track_card', None)
+        at = AppTest.from_file(str(ROOT / 'app/app.py'), default_timeout=30).run()
+        if name != 'app.py':
+            at.switch_page(name).run()
         self.apps.append(at); self.assertFalse(at.exception)
         return at
+    def play(self, at, player='reference', sequence=1, token='test-player', track_id=None,
+             player_track_id=None):
+        component = next(x.proto for x in at.get('bidi_component')
+                         if f'playback_event_{player}_' in x.proto.id
+                         and (player_track_id is None or json.loads(x.proto.json)['track_id'] == player_track_id))
+        data = json.loads(component.json)
+        payload = {'track_id': data['track_id'] if track_id is None else track_id,
+                   'token': token, 'sequence': sequence}
+        states = at._tree.get_widget_states()
+        # Custom components are UnknownElement to AppTest, so include the base
+        # widget state that the real frontend sends alongside its trigger.
+        for element in at.get('bidi_component'):
+            states.widgets.add(id=element.proto.id, json_value='{}')
+        trigger = states.widgets.add(id=f'$$STREAMLIT_INTERNAL_KEY_{component.id}__events')
+        trigger.json_trigger_value = json.dumps([{'event': 'started', 'value': payload}])
+        at._run(states)
+        self.assertFalse(at.exception)
     def widget(self, at, kind, label):
         return next(w for w in getattr(at, kind) if w.label == label)
     def click(self, at, label):
@@ -54,19 +79,24 @@ class UIRegressionTests(unittest.TestCase):
         self.assertFalse(at.exception)
     def metric(self, at, label):
         return self.widget(at, 'metric', label).value
+    def player_tracks(self, at, player):
+        return [json.loads(x.proto.json)['track_id'] for x in at.get('bidi_component')
+                if f'playback_event_{player}_' in x.proto.id]
     def test_music_hides_stale_results_and_measures_recall(self):
         at = self.page('pages/1_Music_Explorer.py')
         self.widget(at, 'checkbox', 'Comparar com busca exaustiva (Recall@K)').check().run()
         self.click(at, 'Encontrar músicas semelhantes')
-        self.assertEqual(len(at.dataframe[0].value), 2)
+        self.assertEqual(len(self.player_tracks(at, 'recommendation')), 2)
+        self.assertFalse(at.dataframe)
         self.assertEqual(self.metric(at, 'Recall@2 medido'), '100.0%')
         self.widget(at, 'slider', 'Top-K resultados').set_value(1).run()
         self.assertEqual(len(at.dataframe), 0)
+        self.assertEqual(self.player_tracks(at, 'recommendation'), [])
         self.assertTrue(any('parâmetros mudaram' in x.value for x in at.info))
         self.click(at, 'Encontrar músicas semelhantes')
-        self.assertEqual(len(at.dataframe[0].value), 1)
+        self.assertEqual(len(self.player_tracks(at, 'recommendation')), 1)
     def test_lab_state_updates_immediately_and_is_independent(self):
-        at = self.page('pages/2_Structures_Lab.py')
+        at = self.page('pages/3_Structures_Lab.py')
         self.click(at, 'Executar operação na Skip List')
         self.assertEqual(self.metric(at, 'Nós na Skip List do laboratório'), '1')
         self.widget(at, 'selectbox', 'Operação da Skip List').set_value('Atualizar chave').run()
@@ -89,19 +119,21 @@ class UIRegressionTests(unittest.TestCase):
         self.assertEqual(len(bridge.find_similar(2, 50, 10)[0]), 2)
     def test_navigation_preserves_search_and_isolates_laboratory(self):
         at = self.page('app.py')
-        self.assertEqual({link.label for link in at.get('page_link')},
-                         {'Music Explorer', 'Structures Lab'})
+        self.assertEqual([title.value for title in at.title], ['Music Explorer'])
+        self.assertEqual([p['page_name'] for p in at._registered_pages.values()],
+                         ['Music Explorer', 'Playback Profile', 'Structures Lab'])
+        self.assertEqual(next(iter(at._registered_pages.values()))['url_pathname'], '')
         self.assertEqual({path.name for path in (ROOT / 'app/pages').glob('*.py')},
-                         {'1_Music_Explorer.py', '2_Structures_Lab.py'})
+                         {'1_Music_Explorer.py', '3_Structures_Lab.py', '2_Playback_Profile.py'})
         at.switch_page('pages/1_Music_Explorer.py').run()
         self.assertFalse(at.exception)
         self.click(at, 'Encontrar músicas semelhantes')
-        expected = at.dataframe[0].value.copy()
+        expected = self.player_tracks(at, 'recommendation')
         self.assertEqual([button.label for button in at.button], ['Encontrar músicas semelhantes'])
         bridge = at.session_state['bridge']
         self.assertEqual(bridge.lab_splay()['size'], 0)
 
-        at.switch_page('pages/2_Structures_Lab.py').run()
+        at.switch_page('pages/3_Structures_Lab.py').run()
         self.assertFalse(at.exception)
         self.widget(at, 'selectbox', 'Operação da Splay Tree').set_value('Acessar ou inserir').run()
         self.widget(at, 'number_input', 'ID na Splay').set_value(999)
@@ -114,7 +146,7 @@ class UIRegressionTests(unittest.TestCase):
         at.switch_page('pages/1_Music_Explorer.py').run()
         self.assertFalse(at.exception)
         self.assertIs(at.session_state['bridge'], bridge)
-        self.assertTrue(at.dataframe[0].value.equals(expected))
+        self.assertEqual(self.player_tracks(at, 'recommendation'), expected)
         self.assertEqual(bridge.track_count, 3)
     def test_laboratory_runs_without_music_dataset(self):
         missing = self.csv.with_name('not_imported.csv')
@@ -123,7 +155,7 @@ class UIRegressionTests(unittest.TestCase):
              patch.object(core_bridge, 'CoreBridge', lambda: self.bridge_type(CORE, missing)):
             at = self.page('app.py')
             self.assertFalse(at.session_state['bridge'].is_loaded)
-            at.switch_page('pages/2_Structures_Lab.py').run()
+            at.switch_page('pages/3_Structures_Lab.py').run()
             self.assertFalse(at.exception)
             self.click(at, 'Executar operação na Skip List')
             self.click(at, 'Executar operação na Splay')
@@ -133,7 +165,7 @@ class UIRegressionTests(unittest.TestCase):
             self.assertFalse(at.exception)
             self.assertTrue(any('Importe o FMA' in warning.value for warning in at.warning))
     def test_skip_operations_validate_only_their_required_fields(self):
-        at = self.page('pages/2_Structures_Lab.py')
+        at = self.page('pages/3_Structures_Lab.py')
         self.assertEqual([w.label for w in at.text_input], ['Chave inteira sem sinal'])
         self.click(at, 'Executar operação na Skip List')
         self.widget(at, 'selectbox', 'Operação da Skip List').set_value('Atualizar chave').run()
@@ -155,7 +187,7 @@ class UIRegressionTests(unittest.TestCase):
             self.assertTrue(self.widget(at, 'button', 'Executar operação na Skip List').disabled)
 
     def test_skip_search_returns_ids_and_mutations_select_existing_nodes(self):
-        at = self.page('pages/2_Structures_Lab.py')
+        at = self.page('pages/3_Structures_Lab.py')
         for key, tid in [('60', 9), ('60', 6), ('70', 6)]:
             self.widget(at, 'text_input', 'Chave inteira sem sinal').set_value(key)
             self.widget(at, 'number_input', 'ID do nó').set_value(tid)
@@ -196,7 +228,7 @@ class UIRegressionTests(unittest.TestCase):
         self.assertEqual(at.dataframe[0].value.to_dict('records'), [{'Chave': '70', 'ID': 6}, {'Chave': '80', 'ID': 6}])
 
     def test_splay_reports_found_missing_existing_and_access_insertion(self):
-        at = self.page('pages/2_Structures_Lab.py')
+        at = self.page('pages/3_Structures_Lab.py')
         self.click(at, 'Executar operação na Splay')
         self.click(at, 'Executar operação na Splay')
         self.assertTrue(any('já existe' in i.value for i in at.info))
@@ -231,17 +263,20 @@ class UIRegressionTests(unittest.TestCase):
         for mode in ['Aproximada experimental', 'Exata certificada']:
             self.widget(at, 'radio', 'Modo de busca').set_value(mode).run()
             self.click(at, 'Encontrar músicas semelhantes')
-            self.assertEqual(len(at.get('audio')), 2)
+            self.assertEqual(len(at.get('audio')), 3)
             self.assertEqual(self.metric(at, 'Recall@2 medido'), '100.0%')
-            self.assertEqual(len(at.dataframe[0].value), 2)
+            self.assertFalse(at.dataframe)
+            self.assertEqual(self.player_tracks(at, 'recommendation'),
+                             [r.track_id for r in at.session_state['search_snapshot']['results']])
         self.widget(at, 'selectbox', 'Selecione uma faixa').set_value(3).run()
         self.assertFalse(at.exception)
         self.assertEqual(len(at.dataframe), 0)
         self.click(at, 'Encontrar músicas semelhantes')
         self.assertEqual({r.track_id for r in at.session_state['search_snapshot']['results']}, {2, 4})
-        self.widget(at, 'selectbox', 'Ouvir uma recomendação').set_value(4).run()
+        self.play(at, player='recommendation', player_track_id=4, token='card-4')
         self.assertFalse(at.exception)
-        self.assertEqual(len(at.get('audio')), 2)
+        self.assertEqual(len(at.get('audio')), 3)
+        self.assertEqual(at.session_state['bridge'].playback_history()['entries'][0]['track_id'], 4)
     def test_benchmark_reader_rejects_unrenderable_files(self):
         from services.benchmarks import read_benchmark
         with tempfile.TemporaryDirectory() as temporary:
@@ -259,10 +294,145 @@ class UIRegressionTests(unittest.TestCase):
             self.assertTrue(data.avg_depth.isna().all())
     def test_dead_core_recovers_on_rerun(self):
         at = self.page('app.py')
+        self.play(at)
         old = at.session_state['bridge']; old._proc.kill(); old._proc.wait()
-        at.run()
+        self.play(at, sequence=2)
         self.assertFalse(at.exception)
         self.assertTrue(at.session_state['bridge'].alive)
         self.assertIsNot(old, at.session_state['bridge'])
+        self.assertEqual(at.session_state['bridge'].playback_history()['total_plays'], 1)
+        at.run()
+        self.play(at, sequence=2)
+        self.assertEqual(at.session_state['bridge'].playback_history()['total_plays'], 1)
+        self.play(at, sequence=3)
+        self.assertEqual(at.session_state['bridge'].playback_history()['total_plays'], 2)
+
+    def test_playback_counts_only_player_starts_without_rerun_duplicates(self):
+        at = self.page('pages/1_Music_Explorer.py')
+        bridge = at.session_state['bridge']
+        self.assertEqual(bridge.playback_history()['total_plays'], 0)
+        self.widget(at, 'selectbox', 'Selecione uma faixa').set_value(3).run()
+        self.click(at, 'Encontrar músicas semelhantes')
+        self.assertEqual(bridge.playback_history()['total_plays'], 0)
+        self.play(at)
+        self.assertEqual(bridge.playback_history()['entries'],
+                         [{'track_id': 3, 'play_count': 1, 'last_play_order': 1}])
+        at.run()
+        self.play(at)  # A redelivered event must not count again.
+        self.assertEqual(bridge.playback_history()['total_plays'], 1)
+        self.play(at, sequence=2)  # Pause/resume is a second start.
+        self.assertEqual(bridge.playback_history()['total_plays'], 2)
+        self.play(at, sequence=4)  # Two rapid starts may share a rerun.
+        self.assertEqual(bridge.playback_history()['total_plays'], 4)
+        self.play(at, sequence=5, track_id=4)  # Stale/wrong player event.
+        self.assertEqual(bridge.playback_history()['total_plays'], 4)
+        self.play(at, player='recommendation', token='recommendation')
+        self.assertEqual(bridge.playback_history()['total_plays'], 5)
+        self.assertEqual(bridge.playback_history()['size'], 2)
+        self.assertEqual(bridge.lab_splay()['size'], 0)
+        at.switch_page('pages/2_Playback_Profile.py').run()
+        self.assertFalse(at.exception)
+        self.assertEqual(self.metric(at, 'Reproduções na sessão'), '5')
+        self.assertEqual(bridge.playback_history()['root_id'], 2)
+        self.assertEqual(len(at.get('audio')), 2)
+        self.assertFalse(at.dataframe)
+        self.widget(at, 'selectbox', 'Buscar no histórico por título, artista ou ID').set_value(3).run()
+        self.assertFalse(at.exception)
+        self.assertEqual(bridge.playback_history()['root_id'], 3)
+        self.assertEqual(bridge.playback_history()['entries'][0]['track_id'], 2)
+        self.assertEqual(self.metric(at, 'Reproduções na sessão'), '5')
+        self.assertEqual(len(at.get('audio')), 1)
+        self.widget(at, 'selectbox', 'Buscar no histórico por título, artista ou ID').set_value(None).run()
+        def visible_tracks():
+            return [json.loads(x.proto.json)['track_id'] for x in at.get('bidi_component')]
+        self.assertEqual(visible_tracks(), [2, 3])
+        self.play(at, player='history', token='history', player_track_id=3)
+        self.assertEqual(bridge.playback_history()['total_plays'], 6)
+        self.assertEqual(bridge.playback_history()['entries'][0]['track_id'], 3)
+        self.assertEqual(self.metric(at, 'Reproduções na sessão'), '5')
+        self.assertEqual(visible_tracks(), [2, 3])
+        self.assertTrue(any('4 reproduções' in caption.value for caption in at.caption))
+        at.run()
+        self.assertEqual(self.metric(at, 'Reproduções na sessão'), '5')
+        self.assertEqual(visible_tracks(), [2, 3])
+        self.click(at, 'Atualizar')
+        self.assertEqual(self.metric(at, 'Reproduções na sessão'), '6')
+        self.assertEqual(visible_tracks(), [3, 2])
+        self.assertTrue(any('5 reproduções' in caption.value for caption in at.caption))
+        self.play(at, player='history', token='other-history', player_track_id=2)
+        self.assertEqual(self.metric(at, 'Reproduções na sessão'), '6')
+        self.assertEqual(visible_tracks(), [3, 2])
+        at.switch_page('pages/3_Structures_Lab.py').run()
+        at.switch_page('pages/2_Playback_Profile.py').run()
+        self.assertFalse(at.exception)
+        self.assertEqual(self.metric(at, 'Reproduções na sessão'), '7')
+        self.assertEqual(visible_tracks(), [2, 3])
+
+    def test_history_empty_new_session_and_invalid_tracks(self):
+        at = self.page('pages/2_Playback_Profile.py')
+        self.assertTrue(any('histórico está vazio' in info.value for info in at.info))
+        bridge = at.session_state['bridge']
+        for tid in [0, -1, 999]:
+            with self.assertRaises(RuntimeError):
+                bridge.record_play(tid)
+        self.assertFalse(bridge.search_history(2)['found'])
+        self.assertEqual(bridge.playback_history()['size'], 0)
+        bridge.record_play(2)
+        fresh = self.page('pages/2_Playback_Profile.py')
+        self.assertEqual(fresh.session_state['bridge'].playback_history()['total_plays'], 0)
+        at.run()
+        self.assertFalse(at.exception)
+        self.assertTrue(any('histórico está vazio' in info.value for info in at.info))
+        self.click(at, 'Atualizar')
+        self.assertEqual(self.metric(at, 'Reproduções na sessão'), '1')
+
+    def test_history_shows_ten_unique_tracks_and_expands_without_refreshing(self):
+        # A larger catalogue exercises the 10/11 boundary using the actual core.
+        frame = pd.read_csv(self.csv)
+        extra = pd.concat([frame.iloc[[0]].copy() for _ in range(9)], ignore_index=True)
+        extra['track_id'] = range(10, 19)
+        frame = pd.concat([frame, extra], ignore_index=True)
+        larger_csv = self.csv.with_name('history_catalog.csv')
+        frame.to_csv(larger_csv, index=False)
+        with patch.object(dataset, 'PROCESSED_CSV', larger_csv), \
+             patch.object(core_bridge, 'CSV', larger_csv), \
+             patch.object(core_bridge, 'CoreBridge', lambda: self.bridge_type(CORE, larger_csv)):
+            at = self.page('app.py')
+            bridge = at.session_state['bridge']
+            ids = frame.track_id.astype(int).tolist()
+            for track_id in ids[:10]:
+                bridge.record_play(track_id)
+            for _ in range(5):
+                bridge.record_play(ids[9])
+            at.switch_page('pages/2_Playback_Profile.py').run()
+            self.assertFalse(at.exception)
+            self.assertEqual(len(self.player_tracks(at, 'history')), 10)
+            self.assertFalse(any(b.label == 'Ver histórico completo' for b in at.button))
+            for track_id in ids[10:]:
+                bridge.record_play(track_id)
+            at.run()
+            self.assertFalse(any(b.label == 'Ver histórico completo' for b in at.button))
+            self.click(at, 'Atualizar')
+            self.assertEqual(self.player_tracks(at, 'history'), list(reversed(ids))[:10])
+            total = bridge.playback_history()['total_plays']
+            self.widget(at, 'selectbox', 'Buscar no histórico por título, artista ou ID').set_value(ids[0]).run()
+            self.assertEqual(self.player_tracks(at, 'history'), [ids[0]])
+            self.assertEqual(bridge.playback_history()['root_id'], ids[0])
+            self.widget(at, 'selectbox', 'Buscar no histórico por título, artista ou ID').set_value(None).run()
+            self.click(at, 'Ver histórico completo')
+            self.assertEqual(self.player_tracks(at, 'history'), list(reversed(ids)))
+            self.assertEqual(bridge.playback_history()['total_plays'], total)
+            self.play(at, player='history', player_track_id=ids[0], token='expanded-history')
+            self.assertEqual(self.player_tracks(at, 'history'), list(reversed(ids)))
+            self.assertEqual(self.metric(at, 'Reproduções na sessão'), str(total))
+            self.click(at, 'Ver menos')
+            self.assertEqual(self.player_tracks(at, 'history'), list(reversed(ids))[:10])
+            self.click(at, 'Ver histórico completo')
+            at.switch_page('pages/1_Music_Explorer.py').run()
+            at.switch_page('pages/2_Playback_Profile.py').run()
+            self.assertFalse(at.exception)
+            self.assertEqual(len(self.player_tracks(at, 'history')), 10)
+            self.assertEqual(self.player_tracks(at, 'history')[0], ids[0])
+            self.assertEqual(self.metric(at, 'Reproduções na sessão'), str(total + 1))
 
 if __name__ == '__main__': unittest.main()

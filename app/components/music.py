@@ -3,8 +3,44 @@ from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
+from pathlib import Path
 
+from services.core_bridge import get_bridge
 from services.dataset import audio_path, get_track
+
+
+# Keep the native player (including streamed media URLs and controls). This
+# component reports its play event without replacing or restarting the audio.
+_playback_events = st.components.v2.component(
+    "ame_playback_events",
+    js=Path(__file__).with_name("playback_events.js").read_text(encoding="utf-8"),
+    isolate_styles=False,
+)
+
+
+def _record_playback(component_key: str, track_id: int) -> None:
+    event = st.session_state[component_key].started
+    if not isinstance(event, dict) or event.get("track_id") != track_id:
+        return
+    token, sequence = event.get("token"), event.get("sequence")
+    if not isinstance(token, str) or not token or type(sequence) is not int or sequence < 1:
+        return
+    seen = st.session_state.setdefault("playback_last_events", {})
+    previous_token, previous_sequence = seen.get(component_key, (None, 0))
+    if previous_token != token:
+        previous_sequence = 0
+    if sequence <= previous_sequence:
+        return
+    bridge = get_bridge()
+    try:
+        if bridge is None:
+            raise RuntimeError("Núcleo indisponível para registrar a reprodução.")
+        for count in range(previous_sequence + 1, sequence + 1):
+            bridge.record_play(track_id)
+            seen[component_key] = (token, count)
+        st.session_state.pop("playback_error", None)
+    except RuntimeError as exc:
+        st.session_state.playback_error = str(exc)
 
 
 def track_selector(catalog: pd.DataFrame, key: str,
@@ -27,11 +63,24 @@ def track_selector(catalog: pd.DataFrame, key: str,
     return tid, labels[tid]
 
 
-def render_player(track_id: int, catalog: pd.DataFrame) -> None:
-    info = get_track(track_id, catalog)
-    st.caption(f"{info['artist']} · {info['genre']} · ID {track_id}")
+def render_player(track_id: int, catalog: pd.DataFrame, key: str = "music", *,
+                  show_metadata: bool = True) -> None:
+    if show_metadata:
+        info = get_track(track_id, catalog)
+        st.caption(f"{info['artist']} · {info['genre']} · ID {track_id}")
     path = audio_path(track_id, catalog)
     if path:
-        st.audio(str(path), format="audio/mpeg")
+        container_key = f"playback_player_{key}_{track_id}"
+        component_key = f"playback_event_{key}_{track_id}"
+        with st.container(key=container_key, gap=None):
+            st.audio(str(path), format="audio/mpeg")
+            _playback_events(
+                key=component_key,
+                data={"track_id": track_id, "container_key": container_key},
+                on_started_change=lambda: _record_playback(component_key, track_id),
+                height=0,
+            )
     else:
         st.info("Áudio desta faixa não encontrado. Verifique a pasta fma_medium.")
+    if st.session_state.get("playback_error"):
+        st.error(f"Não foi possível atualizar o histórico: {st.session_state.playback_error}")

@@ -6,10 +6,11 @@
 
 namespace ame {
 
-/// One laboratory node of the Splay Tree, keyed by integer ID.
+/// A Splay Tree node keyed by track ID; also used by the playback history.
 struct SplayNode {
     int trackId = 0;
     int accessCount = 0;
+    std::uint64_t lastPlayOrder = 0;
     int subtreeSize = 1;
     int subtreeHeight = 0;
 
@@ -33,7 +34,7 @@ struct SplayMetrics {
     void reset() { *this = SplayMetrics{}; }
 };
 
-/// Self-adjusting BST for laboratory experiments and access benchmarks.
+/// Self-adjusting BST for playback history, laboratory and access benchmarks.
 /// Every access splays the touched node to the root, exploiting temporal
 /// locality so recently accessed nodes stay shallow.
 class SplayTree {

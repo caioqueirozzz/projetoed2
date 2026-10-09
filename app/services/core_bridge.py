@@ -4,7 +4,7 @@ The C++ binary (``build/ame_core_app``) owns the Skip List and Splay Tree.
 This module communicates with it via a persistent subprocess: one text command
 per stdin line, one JSON object per stdout line.
 
-Commands: load, search, track, skiplist_state, lab_skip, lab_splay, quit.
+Commands: load, search, track, history, skiplist_state, lab_skip, lab_splay, quit.
 
 Usage in Streamlit pages:
     from services.core_bridge import get_bridge
@@ -167,6 +167,24 @@ class CoreBridge:
         self._check(response)
         return response["acoustic_key"]
 
+    def playback_history(self) -> dict:
+        """List this session's played tracks, most recently played first."""
+        response = self._cmd("history state")
+        self._check(response)
+        return response
+
+    def record_play(self, track_id: int) -> dict:
+        """Record one playback start and splay the track to the root."""
+        response = self._cmd(f"history play {int(track_id)}")
+        self._check(response)
+        return response
+
+    def search_history(self, track_id: int) -> dict:
+        """Look up a played track using the Splay Tree, without counting a play."""
+        response = self._cmd(f"history search {int(track_id)}")
+        self._check(response)
+        return response
+
     def lab_skip(self, operation: str = "state", key: int = 0, track_id: int = 1,
                  new_key: int = 0) -> dict:
         if operation not in {"state", "insert", "remove", "search", "update", "traverse", "reset"}:
@@ -257,9 +275,11 @@ def get_bridge() -> Optional[CoreBridge]:
         previous = st.session_state.get("bridge")
         if previous is not None:
             previous.close()
-        # Search results and laboratory snapshots belong to the previous core.
+        # Snapshots belong to the previous core. Acknowledged player sequences
+        # belong to the browser session: keep them so its next play counts once
+        # even when its audio element survives a core restart.
         for key in list(st.session_state):
-            if key.startswith(("search_", "sl_", "sp_")):
+            if key != "playback_last_events" and key.startswith(("search_", "sl_", "sp_", "history_", "playback_")):
                 del st.session_state[key]
         st.session_state.dataset_signature = signature
         try:
